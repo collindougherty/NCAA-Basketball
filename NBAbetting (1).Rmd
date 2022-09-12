@@ -1,0 +1,211 @@
+
+NBA Gambling - Brett, Collin, Jessica
+
+
+
+
+```{r}
+library(tidyverse)
+library(hoopR)
+library(tidymodels)
+```
+
+```{r}
+games <- load_nba_schedule(
+  seasons = most_recent_nba_season()
+)
+
+today <- Sys.Date()
+
+todaygames <- games %>% filter(date == today & status.type.completed == FALSE)
+
+gameids <- pull(todaygames, id)
+
+betting <- tibble()
+
+for (i in gameids){
+  bet <- espn_nba_betting(i)
+  onebet <- bet[[1]] %>% filter(provider_id == "45") %>% mutate(id = i) %>% select(id, details, away_team_odds_team_id, away_team_odds_money_line, home_team_odds_team_id, home_team_odds_money_line) %>% inner_join(bet[[2]], by=c("away_team_odds_team_id"="id")) %>% rename(away_team_display_name = display_name, away_team__abbreviation = abbreviation) %>% inner_join(bet[[2]], by=c("home_team_odds_team_id"="id")) %>% rename(home_team_display_name = display_name, home_team_abbreviation = abbreviation) %>% select(id, away_team_display_name, away_team_odds_money_line, home_team_display_name, home_team_odds_money_line) 
+  betting <- bind_rows(betting, onebet)
+}
+```
+
+```{r}
+teamgames <- load_nba_team_box(seasons = 2015:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:34, as.numeric) %>% 
+  mutate(team_id = as.numeric(team_id))
+```
+
+```{r}
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    possessions = field_goals_attempted - offensive_rebounds + turnovers + (.475 * free_throws_attempted),
+    team_offensive_efficiency = (team_score/possessions)*100,
+    team_cumulative_o_eff = lag(cummean(team_offensive_efficiency), n=1, default=0),
+  ) %>% ungroup()
+
+teamstats <- teamstats %>% 
+  select(game_id, team_id, team_offensive_efficiency) %>%
+  rename(opponent_id = team_id, opponent_offensive_efficiency=team_offensive_efficiency) %>% 
+  left_join(teamstats) %>%
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_cumulative_d_eff = lag(cummean(opponent_offensive_efficiency), n=1, default=0),
+    team_home_away = case_when(
+      home_away == "HOME" ~ 1,
+      home_away == "AWAY" ~ 0
+    )) %>% ungroup()
+
+team_side <- teamstats %>%
+  select(game_id, team_id, team_short_display_name, opponent_id, game_date, season, team_score, team_cumulative_o_eff, team_cumulative_d_eff, team_home_away) %>% na.omit()
+
+opponent_side <- teamstats %>%
+  select(game_id, team_id, team_short_display_name, team_score, team_cumulative_o_eff, team_cumulative_d_eff) %>% na.omit() %>%
+  rename(
+    opponent_id = team_id,
+    opponent_short_display_name = team_short_display_name,
+    opponent_score = team_score,
+    opponent_cumulative_o_eff = team_cumulative_o_eff,
+    opponent_cumulative_d_eff = team_cumulative_d_eff
+  ) %>%
+  mutate(
+    opponent_id = as.numeric(opponent_id)
+    )
+
+games <- team_side %>% inner_join(opponent_side) %>% mutate(
+  TeamResult = as.factor(case_when(
+    team_score > opponent_score ~ "W",
+    opponent_score > team_score ~ "L"
+))) %>% na.omit()
+
+games$TeamResult <- relevel(games$TeamResult, ref="W")
+
+cumulativesimplemodelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, opponent_cumulative_o_eff, opponent_cumulative_d_eff, team_cumulative_d_eff, team_cumulative_o_eff, team_home_away, TeamResult) %>% na.omit() %>% filter(team_cumulative_d_eff > 0)
+```
+
+```{r}
+cumulative_split <- initial_split(cumulativesimplemodelgames, prop = .8)
+cumulative_train <- training(cumulative_split)
+cumulative_test <- testing(cumulative_split)
+```
+
+```{r}
+cumulative_recipe <- 
+  recipe(TeamResult ~ ., data = cumulative_train) %>% 
+  update_role(game_id, game_date, team_short_display_name, opponent_short_display_name, season, new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(cumulative_recipe)
+```
+```{r}
+log_mod <- 
+  logistic_reg() %>% 
+  set_engine("glm") %>%
+  set_mode("classification")
+```
+
+```{r}
+log_workflow <- 
+  workflow() %>% 
+  add_model(log_mod) %>% 
+  add_recipe(cumulative_recipe)
+```
+
+```{r}
+log_fit <- 
+  log_workflow %>% 
+  fit(data = cumulative_train)
+```
+
+```{r}
+logpredict <- log_fit %>% predict(new_data = cumulative_train) %>%
+  bind_cols(cumulative_train) 
+
+logpredict <- log_fit %>% predict(new_data = cumulative_train, type="prob") %>%
+  bind_cols(logpredict)
+
+metrics(logpredict, TeamResult, .pred_class)
+```
+
+```{r}
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    possessions = field_goals_attempted - offensive_rebounds + turnovers + (.475 * free_throws_attempted),
+    team_offensive_efficiency = (team_score/possessions)*100,
+    team_cumulative_o_eff = cummean(team_offensive_efficiency),
+  ) %>% ungroup()
+
+teamstats <- teamstats %>% 
+  select(game_id, team_id, team_offensive_efficiency) %>%
+  rename(opponent_id = team_id, opponent_offensive_efficiency=team_offensive_efficiency) %>% 
+  left_join(teamstats) %>%
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_cumulative_d_eff = cummean(opponent_offensive_efficiency),
+    team_home_away = case_when(
+      home_away == "HOME" ~ 1,
+      home_away == "AWAY" ~ 0
+    )) %>% ungroup()
+
+team_side <- teamstats %>%
+  select(game_id, team_id, team_short_display_name, opponent_id, game_date, season, team_score, team_cumulative_o_eff, team_cumulative_d_eff, team_home_away) %>% na.omit()
+
+opponent_side <- teamstats %>%
+  select(game_id, team_id, team_short_display_name, team_score, team_cumulative_o_eff, team_cumulative_d_eff) %>% na.omit() %>%
+  rename(
+    opponent_id = team_id,
+    opponent_short_display_name = team_short_display_name,
+    opponent_score = team_score,
+    opponent_cumulative_o_eff = team_cumulative_o_eff,
+    opponent_cumulative_d_eff = team_cumulative_d_eff
+  ) %>%
+  mutate(
+    opponent_id = as.numeric(opponent_id)
+    )
+
+games <- team_side %>% inner_join(opponent_side) %>% mutate(
+  TeamResult = as.factor(case_when(
+    team_score > opponent_score ~ "W",
+    opponent_score > team_score ~ "L"
+))) %>% na.omit()
+
+games$TeamResult <- relevel(games$TeamResult, ref="W")
+
+cumulativesimplemodelgames <- games %>% select(game_date, team_short_display_name, opponent_short_display_name, season, opponent_cumulative_o_eff, opponent_cumulative_d_eff, team_cumulative_d_eff, team_cumulative_o_eff, team_home_away, TeamResult) %>% na.omit() %>% filter(team_cumulative_d_eff > 0)
+```
+
+```{r}
+todaystats <- cumulativesimplemodelgames %>% group_by(team_short_display_name) %>% filter(game_date == max(game_date) & season == 2022) %>% slice(1) %>% select(-TeamResult, -starts_with("opponent")) %>% right_join(todaygames, by=c("team_short_display_name" = "home.name", "season" = "season"))
+
+todaystats <- cumulativesimplemodelgames %>% group_by(opponent_short_display_name) %>% filter(game_date == max(game_date) & season == 2022) %>% slice(1) %>% ungroup() %>% select(-TeamResult, -starts_with("team"), -game_date, -season) %>% right_join(todaystats, by=c("opponent_short_display_name" = "away.name"))
+
+todaypredictions <- todaystats %>% select(id, game_date, season, team_short_display_name, opponent_short_display_name, team_cumulative_o_eff, team_cumulative_d_eff, team_home_away, opponent_cumulative_o_eff, opponent_cumulative_d_eff) %>% rename(game_id = id)
+```
+
+```{r}
+logpredict <- log_fit %>% predict(new_data = todaypredictions) %>%
+  bind_cols(todaypredictions) 
+
+logpredict <- log_fit %>% predict(new_data = todaypredictions, type="prob") %>%
+  bind_cols(logpredict)
+```
+
+
+```{r}
+logpredict %>% inner_join(betting, by=c("game_id"="id")) %>% select(.pred_W, .pred_class, home_team_display_name, home_team_odds_money_line, away_team_display_name, away_team_odds_money_line)
+```
+
+Bucks 110
+Hawks -230
+76ers -475

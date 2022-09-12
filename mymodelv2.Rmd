@@ -1,0 +1,441 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(zoo)
+library(hoopR)
+library(corrr)
+```
+
+```{r}
+data <- load_mbb_team_box(seasons = 2003:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:34, as.numeric) %>%
+  rename(team = team_short_display_name,
+         fgm = field_goals_made,
+         threes = three_point_field_goals_made,
+         ftm = free_throws_made,
+         fta = free_throws_attempted,
+         fga = field_goals_attempted,
+         threes_attempted = three_point_field_goals_attempted,
+         fg_pct = field_goal_pct
+         ) %>% 
+  arrange(game_date)
+
+```
+
+
+```{r}
+  # cummean
+  # look at spreads and see if you can beat them, maybe NBA project though
+
+# important to group by in order to properly calculate rolling_means
+teamdata <- data %>% 
+  group_by(team, season) %>%
+  # creating some new stats that we will use
+  mutate(
+    team_score = ((fgm - threes) * 2) + (threes*3) + ftm,
+    possessions = fga - offensive_rebounds + turnovers + (.475 * fta),
+    ppp = team_score/possessions,
+    turnover_pct = turnovers/(fga + 0.44 * fta + turnovers),
+    free_throw_factor = ftm/fga,
+    true_shooting = (team_score / (2*(fga + (.44 * fta)))) * 100, 
+    efg = (fgm + .5*threes)/fga,
+    three_pct = threes/threes_attempted,
+    three_pct = as.numeric(three_pct),
+    # a binary variable to identify whether teams are home or away
+    dummy_home_away = ifelse(home_away == "HOME", 1, 0),
+    
+    #rolling means, lag prevents model from knowing current results, align right is needed because rolling mean automatically chooses a value from the future without it, fill NA replaces errors with NA rather than the value of the game cell
+    r_three_pct = rollmean(lag(three_pct, n = 1), k=12, align = "right", fill=NA),
+    r_fg_pct = rollmean(lag(fg_pct, n=1), k=12, align = "right", fill=NA),
+    r_ppp = rollmean(lag(ppp, n=1), k=12, align = "right", fill=NA),
+    r_true_shoot = rollmean(lag(true_shooting, n=1), k=12, align = "right", fill=NA),
+    r_turnover_pct = rollmean(lag(turnover_pct, n=1), k=12, align = "right", fill=NA),
+    r_ftf = rollmean(lag(free_throw_factor, n=1), k=12, align = "right", fill=NA),
+    ) %>% 
+        mutate(team_id = as.numeric(team_id),
+               game_id = as.numeric(game_id))
+
+excluded_vars <- c("team_uid", "team_alternate_color", "team_color", "team_display_name", "team_name", "team_logo", "team_location", "team_abbreviation", "team_slug", "opponent_mascot", "opponent_abbrev", "largest_lead")
+teamdata <- teamdata %>% select(-excluded_vars) %>% ungroup()
+
+nu1 <- teamdata %>% filter(team == "Nebraska")
+view(nu1)
+```
+
+```{r}
+opponentdata <- teamdata %>% #select(-excluded_vars) %>%
+    rename(opponent = opponent_name,
+          opp_id=opponent_id, 
+          opp_offensive_rebounds = offensive_rebounds,
+          opp_defensive_rebounds=defensive_rebounds,
+    opp_score = team_score,
+    opp_possessions = possessions, 
+    opp_ppp = ppp, 
+    opp_true_shooting = true_shooting, 
+    opp_turnover_pct = turnover_pct,
+    opp_fgm = fgm, 
+    opp_fga = fga, 
+    opp_fg_pct = fg_pct, 
+    opp_threes = threes, 
+    opp_threes_attempted = threes_attempted, 
+    opp_three_pct = three_pct, 
+    opp_ftm = ftm, 
+    opp_fta = fta, 
+    opp_free_throw_pct = free_throw_pct, 
+    opp_free_throw_factor = free_throw_factor, 
+    opp_total_rebounds = total_rebounds, 
+    opp_offensive_rebounds = offensive_rebounds, 
+    opp_defensive_rebounds = defensive_rebounds, 
+    opp_assists = assists, 
+    opp_steals = steals, 
+    opp_blocks = blocks, 
+    opp_turnovers = turnovers, 
+    opp_fouls = fouls, 
+    opp_three_point_field_goal_pct = three_point_field_goal_pct,
+    opp_team_rebounds = team_rebounds,
+    opp_team_turnovers = team_turnovers,
+    opp_total_turnovers = total_turnovers,
+    opp_total_technical_fouls = total_technical_fouls,
+    opp_technical_fouls =technical_fouls,
+    opp_flagrant_fouls = flagrant_fouls,
+    opp_home_away = home_away,
+    opp_efg = efg,
+    opp_dummy_home_away = dummy_home_away,
+   
+    opp_r_three_pct = r_three_pct,
+    opp_r_true_shoot = r_true_shoot,
+    opp_r_ppp = r_ppp,
+    opp_r_fg_pct = r_fg_pct,
+    opp_r_ftf = r_ftf,
+    opp_r_turnover_pct = r_turnover_pct) %>% 
+        mutate(opp_id = as.numeric(opp_id),
+               game_id = as.numeric(game_id))
+
+
+excluded_vars <- c("opponent", "opp_id")
+opponentdata <- opponentdata %>% select(-excluded_vars)
+opponentdata <- opponentdata %>% rename(opponent_name = team,
+                                        opponent_id = team_id)
+
+nu2 <- opponentdata %>% filter(opponent_id == 158)
+view(nu2)
+```
+
+```{r}
+bothdata <- teamdata %>% inner_join(opponentdata) 
+
+nu3 <- bothdata %>% filter(team == "Nebraska")
+view(nu3)
+```
+
+```{r}
+bothdata <- bothdata %>% group_by(team, season) %>% mutate(
+    orb_pct = offensive_rebounds / (offensive_rebounds + opp_defensive_rebounds),
+    drb_pct = defensive_rebounds / (opp_offensive_rebounds + defensive_rebounds),
+    r_orb_pct = rollmean(lag(orb_pct, n=1), k=10, align = "right", fill=NA),
+    r_drb_pct = rollmean(lag(drb_pct, n=1), k=10,  align = "right", fill=NA)) %>% ungroup()
+
+nu4 <- bothdata %>% filter(team == "Nebraska")
+view(nu4)
+osu4 <- bothdata %>% filter(team == "Ohio State")
+view(osu4)
+```
+
+```{r}
+opponent_rebound_data <- bothdata %>% select(game_id, team_id, game_date, season, orb_pct, drb_pct, r_orb_pct, r_drb_pct) %>%
+  rename(opponent_id = team_id,
+         opp_orb_pct = orb_pct,
+         opp_drb_pct = drb_pct,
+         opp_r_orb_pct = r_orb_pct,
+         opp_r_drb_pct = r_drb_pct)
+bothdatawithrebounds <- bothdata %>% inner_join(opponent_rebound_data)
+
+nu5 <- bothdatawithrebounds %>% filter(team == "Nebraska")
+view(nu5)
+```
+
+```{r}
+teamdatawithreboundsanddefense <- bothdatawithrebounds %>% group_by(team, season) %>% mutate(
+  r_d_ppp = rollmean(lag(opp_ppp, n=1), k=10, align = "right", fill=NA)
+) %>% ungroup()
+
+nu6 <- teamdatawithreboundsanddefense %>% filter(team == "Nebraska")
+view(nu6)
+```
+
+```{r}
+opponent_defense_data <- teamdatawithreboundsanddefense %>% select(game_id, team_id, game_date, season, r_d_ppp) %>%
+  rename(opponent_id = team_id,
+         opp_r_d_ppp = r_d_ppp)
+bothdatawithreboundsanddefense <- teamdatawithreboundsanddefense %>% inner_join(opponent_defense_data)
+
+nu7 <- bothdatawithreboundsanddefense %>% filter(team == "Nebraska")
+view(nu7)
+osu7 <- bothdatawithreboundsanddefense %>% filter(team == "Ohio State")
+view(osu7)
+```
+
+```{r}
+games <- bothdatawithreboundsanddefense
+
+games <- games %>% mutate(
+  TeamResult = as.factor(case_when(
+    team_score > opp_score ~ "W",
+    opp_score > team_score ~ "L"
+)))
+```
+
+
+```{r}
+modelgames <- games %>% select(game_id, game_date, team, opponent_name, season, dummy_home_away,
+                               
+                               r_true_shoot, opp_r_true_shoot, 
+                               r_turnover_pct, opp_r_turnover_pct, 
+                               r_ftf, opp_r_ftf, 
+                               r_orb_pct, opp_r_orb_pct, 
+                               r_fg_pct, opp_r_fg_pct, 
+                               r_three_pct, opp_r_three_pct, 
+                               r_ppp, opp_r_ppp,
+                               
+                               r_d_ppp, opp_r_d_ppp,
+                               
+                               #rolling_sos, opponent_rolling_sos,
+                               
+                               TeamResult) %>% na.omit()
+
+```
+
+```{r}
+game_split <- initial_split(modelgames, prop = .8)
+game_train <- training(game_split)
+game_test <- testing(game_split)
+
+game_recipe <- 
+  recipe(TeamResult ~ ., data = game_train) %>% 
+  update_role(game_id, game_date, team, opponent_name, season,
+              new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(game_recipe)
+```
+
+```{r}
+log_mod <- 
+  logistic_reg() %>% 
+  set_engine("glm") %>%
+  set_mode("classification")
+
+rf_mod <- 
+  rand_forest() %>% 
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+svm_mod <- 
+  svm_poly() %>%
+  set_engine("kernlab") %>%
+  set_mode("classification") 
+
+xg_mod <-   boost_tree(
+  trees = tune(), 
+  learn_rate = tune(),
+  tree_depth = tune(), 
+  min_n = tune(),
+  loss_reduction = tune(), 
+  sample_size = tune(), 
+  mtry = tune(), 
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost")
+```
+
+```{r}
+log_workflow <- 
+  workflow() %>% 
+  add_model(log_mod) %>% 
+  add_recipe(game_recipe)
+
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(game_recipe)
+
+svm_workflow <- 
+  workflow() %>% 
+  add_model(svm_mod) %>% 
+  add_recipe(game_recipe)
+
+xg_wflow <- 
+  workflow() %>% 
+  add_model(xg_mod) %>% 
+  add_recipe(game_recipe)
+```
+
+```{r}
+log_fit <- 
+  log_workflow %>% 
+  fit(data = game_train)
+
+rf_fit <- 
+  rf_workflow %>% 
+  fit(data = game_train)
+
+svm_fit <- 
+  svm_workflow %>% 
+  fit(data = game_train)
+
+xgb_grid <- grid_latin_hypercube(
+  trees(),
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), game_train),
+  learn_rate(),
+  size = 30
+)
+
+game_folds <- vfold_cv(game_train)
+
+xgb_res <- tune_grid(
+  xg_wflow,
+  resamples = game_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+best_acc <- select_best(xgb_res, "accuracy")
+
+final_xgb <- finalize_workflow(
+  xg_wflow,
+  best_acc
+)
+
+xg_fit <- 
+  final_xgb %>% 
+  fit(data = game_train)
+
+trainresults <- game_train %>%
+  bind_cols(predict(xg_fit, game_train))
+
+metrics(trainresults, truth = TeamResult, estimate = .pred_class)
+```
+
+```{r}
+logpredict <- log_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+logpredict <- log_fit %>% predict(new_data = game_train, type="prob") %>%
+  bind_cols(logpredict)
+
+rfpredict <- rf_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+rfpredict <- rf_fit %>% predict(new_data = game_train, type="prob") %>%
+  bind_cols(rfpredict)
+
+svmpredict <- svm_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+svmpredict <- svm_fit %>% predict(new_data = game_train, type="prob") %>%
+  bind_cols(svmpredict)
+```
+
+```{r}
+metrics(logpredict, TeamResult, .pred_class)
+```
+
+```{r}
+metrics(rfpredict, TeamResult, .pred_class)
+```
+
+```{r}
+metrics(svmpredict, TeamResult, .pred_class)
+```
+
+```{r}
+logtestpredict <- log_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+logtestpredict <- log_fit %>% predict(new_data = game_test, type="prob") %>%
+  bind_cols(logtestpredict)
+
+metrics(logtestpredict, TeamResult, .pred_class)
+```
+
+```{r}
+rftestpredict <- rf_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+rftestpredict <- rf_fit %>% predict(new_data = game_test, type="prob") %>%
+  bind_cols(rftestpredict)
+
+metrics(rftestpredict, TeamResult, .pred_class)
+```
+
+```{r}
+svmtestpredict <- svm_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+svmtestpredict <- svm_fit %>% predict(new_data = game_test, type="prob") %>%
+  bind_cols(svmtestpredict)
+
+metrics(svmtestpredict, TeamResult, .pred_class)
+```
+
+```{r}
+testresults <- game_test %>%
+  bind_cols(predict(xg_fit, game_test))
+
+metrics(testresults, truth = TeamResult, estimate = .pred_class)
+```
+
+
+```{r}
+logtestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+rftestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+svmtestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+nu <- modelgames %>% filter(team == "Nebraska" & season == 2022) %>% arrange(game_date)
+
+nulogpredict <- log_fit %>% predict(new_data = nu) %>%
+  bind_cols(nu)
+
+nulogpredict <- log_fit %>% predict(new_data = nu, type="prob") %>%
+  bind_cols(nulogpredict)
+
+nulogpredict %>% select(.pred_class, TeamResult, opponent_name, everything())
+```
+
+```{r}
+nurfpredict <- rf_fit %>% predict(new_data = nu) %>%
+  bind_cols(nu)
+
+nurfpredict <- rf_fit %>% predict(new_data = nu, type="prob") %>%
+  bind_cols(nurfpredict)
+
+nurfpredict %>% select(.pred_class, TeamResult, opponent_name, everything())
+```
+
+```{r}
+nusvmpredict <- svm_fit %>% predict(new_data = nu) %>%
+  bind_cols(nu)
+
+nusvmpredict <- svm_fit %>% predict(new_data = nu, type="prob") %>%
+  bind_cols(nusvmpredict)
+
+nusvmpredict %>% select(.pred_class, TeamResult, opponent_name, everything())
+```

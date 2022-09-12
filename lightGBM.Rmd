@@ -1,0 +1,127 @@
+```{r}
+library(tidyverse)
+library(parsnip)
+library(rsample)
+library(yardstick)
+library(recipes)
+library(workflows)
+library(dials)
+library(tune)
+library(janitor)
+library(remotes)
+#remotes::install_github("curso-r/treesnip")
+#install.packages("lightgbm")
+library(treesnip)
+library(lightgbm)
+library(hoopR)
+library(parallel)
+```
+
+```{r}
+# process in parallel
+library(doParallel) 
+cl <- makeCluster(detectCores(), type='PSOCK')
+registerDoParallel(cl)
+```
+
+```{r}
+game_split <- initial_split(modelgames, prop = .8)
+game_train <- training(game_split)
+game_test <- testing(game_split)
+
+game_recipe <- 
+  recipe(TeamResult ~ ., data = game_train) %>% 
+  update_role(game_id, game_date, team, opponent_name, season,
+              new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(game_recipe)
+```
+
+```{r}
+score_model <- boost_tree(
+  mtry = 5, 
+  trees = 1000, 
+  min_n = tune(), 
+  tree_depth = tune(),
+  loss_reduction = tune(), 
+  learn_rate = tune(), 
+  sample_size = 0.75
+) %>% 
+  set_mode("classification") %>%
+  set_engine("lightgbm")
+```
+
+```{r}
+score_wf <- workflow() %>% 
+    add_model(score_model) %>% 
+    add_recipe(game_recipe)
+```
+
+```{r}
+# resamples
+score_resamples <- vfold_cv(game_train, v = 4)
+
+# grid
+score_grid <- parameters(score_model) %>% 
+    finalize(game_train) %>% 
+    grid_random(size = 200)
+head(score_grid)
+```
+
+```{r}
+# grid search
+score_tune_grid <- score_wf %>%
+    tune_grid(
+        resamples = score_resamples,
+        grid = score_grid,
+        control = control_grid(verbose = FALSE),
+        metrics = metric_set(roc_auc)
+    )
+```
+
+```{r}
+autoplot(score_tune_grid)
+```
+
+```{r}
+# top 5 hiperparams set
+show_best(score_tune_grid, "roc_auc")
+```
+
+```{r}
+# select best hiperparameter found
+score_best_params <- select_best(score_tune_grid, "roc_auc")
+score_wf <- score_wf %>% finalize_workflow(score_best_params)
+
+# last fit
+score_last_fit <- last_fit(
+  score_wf,
+  score_initial_split
+)
+
+# metrics
+collect_metrics(score_last_fit)
+```
+
+```{r}
+# roc curve
+score_test_preds <- collect_predictions(score_last_fit)
+score_roc_curve <- score_test_preds %>% roc_curve(TeamResult, .pred_class)
+autoplot(score_roc_curve)
+```
+
+```{r}
+# confusion matrix
+score_test_preds %>%
+  # mutate(
+  #   income_class = factor(if_else(`.pred_<=50K` > 0.6, "<=50K", ">50K"))
+  # ) %>%
+  conf_mat(TeamResult, pred_class)
+```
+
+```{r}
+# turn parallel processing off and run sequentially again:
+registerDoSEQ()
+```
+

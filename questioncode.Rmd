@@ -1,0 +1,81 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(zoo)
+library(hoopR)
+library(corrr)
+```
+
+```{r}
+teamgames <- load_mbb_team_box(seasons = 2015:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:34, as.numeric) 
+
+teamgames <- teamgames %>% arrange(game_date)
+```
+
+```{r}
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    true_shooting_percentage = (team_score / (2*(field_goals_attempted + (.44 * free_throws_attempted)))) * 100,
+    turnover_pct = turnovers/(field_goals_attempted + 0.44 * free_throws_attempted + turnovers),
+    free_throw_factor = free_throws_made/field_goals_attempted,
+    team_rolling_true_shooting_percentage = rollmean(lag(true_shooting_percentage, n=1), k=2, align = "right", fill=NA),
+    team_rolling_turnover_percentage = rollmean(lag(turnover_pct, n=1), k=2, align = "right", fill=NA),
+    team_rolling_free_throw_factor = rollmean(lag(free_throw_factor, n=1), k=2, align = "right", fill=NA)
+  ) %>% ungroup()
+
+opponent <- teamstats %>% select(game_id, team_id, offensive_rebounds, defensive_rebounds) %>% rename(opponent_id=team_id, opponent_offensive_rebounds = offensive_rebounds, opponent_defensive_rebounds=defensive_rebounds) %>% mutate(opponent_id = as.numeric(opponent_id))
+
+newteamstats <- teamstats %>% 
+  inner_join(opponent) %>% 
+  mutate(
+    orb = offensive_rebounds / (offensive_rebounds + opponent_defensive_rebounds),
+    drb = defensive_rebounds / (opponent_offensive_rebounds + defensive_rebounds),
+    team_rolling_orb = rollmean(lag(orb, n=1), k=2, align = "right", fill=NA),
+    team_rolling_drb = rollmean(lag(drb, n=1), k=2, align = "right", fill=NA)
+    )
+
+```
+
+
+```{r}
+team_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, opponent_id, game_date, season, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb) %>% na.omit()
+```
+
+```{r}
+opponent_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb) %>% na.omit() %>%
+  rename(
+    opponent_id = team_id,
+    opponent_short_display_name = team_short_display_name,
+    opponent_score = team_score,
+    opponent_rolling_true_shooting_percentage = team_rolling_true_shooting_percentage,
+    opponent_rolling_free_throw_factor = team_rolling_free_throw_factor,
+    opponent_rolling_turnover_percentage = team_rolling_turnover_percentage,
+    opponent_rolling_orb = team_rolling_orb,
+    opponent_rolling_drb = team_rolling_drb
+  ) %>%
+  mutate(opponent_id = as.numeric(opponent_id))
+
+games <- team_side %>% inner_join(opponent_side)
+```
+
+```{r}
+# notice that when sorted by date the early games claim to have a certain value for each rolling stat, where we would expect na.omit() to omit these games. 
+# in particular, notice in Nebraska's first game of 14-15 against northern kentucky, rollmean claims a 2 game rolling true shooting avg of 53% - considering there were no games played before this one and there is no 2013-14 season in the data, where is it calculating this from?
+# not a huge issue as it should in theory resolve itself over the course of the season, but it is an issue for longer rolling means, as well as making sense out of early season predictions
+nebraska2 <- teamstats %>% filter(team_short_display_name == "Nebraska")
+view(nebraska2)
+nebraska <- games %>% filter(team_short_display_name == "Nebraska")
+view(nebraska)
+nebraska3 <- newteamstats %>% filter(team_short_display_name == "Nebraska")
+view(nebraska3)
+nebraska4 <- teamgames %>% filter(team_short_display_name == "Nebraska")
+view(nebraska4)
+```

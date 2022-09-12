@@ -1,0 +1,583 @@
+#v4 updates:
+  - added rolling means for most recent 10 games
+  - removed ppp as it had been unintentionally duplicated in previous model
+  - reformatted some of the chunks to be able to run specific sections easier
+  
+# metrics
+  - score_margin error on projections is now significantly less, down to ~10.5 from previous ~11.5
+  - sample size is now significantly smaller due to the games without rolling means being omitted
+  - on the upside, that means the ~71% accuracy is coming almost entirely from conference games
+  - 
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(zoo)
+library(hoopR)
+library(corrr)
+```
+
+```{r}
+data <- load_mbb_team_box(seasons = 2003:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:34, as.numeric) %>%
+  rename(team = team_short_display_name,
+         fgm = field_goals_made,
+         threes = three_point_field_goals_made,
+         ftm = free_throws_made,
+         fta = free_throws_attempted,
+         fga = field_goals_attempted,
+         threes_attempted = three_point_field_goals_attempted,
+         fg_pct = field_goal_pct
+         ) %>% 
+  arrange(game_date)
+
+```
+
+
+```{r}
+  # cummean
+  # look at spreads and see if you can beat them, maybe NBA project though
+
+# important to group by in order to properly calculate rolling_means
+teamdata <- data %>% 
+  group_by(team, season) %>%
+  # creating some new stats that we will use
+  mutate(
+    team_score = ((fgm - threes) * 2) + (threes*3) + ftm,
+    possessions = fga - offensive_rebounds + turnovers + (.475 * fta),
+    ppp = team_score/possessions,
+    turnover_pct = turnovers/(fga + 0.44 * fta + turnovers),
+    free_throw_factor = ftm/fga,
+    true_shooting = (team_score / (2*(fga + (.44 * fta)))) * 100, 
+    efg = (fgm + .5*threes)/fga,
+    three_pct = threes/threes_attempted,
+    three_pct = as.numeric(three_pct),
+    # a binary variable to identify whether teams are home or away
+    dummy_home_away = ifelse(home_away == "HOME", 1, 0),
+    
+    #rolling means, lag prevents model from knowing current results, align right is needed because rolling mean automatically chooses a value from the future without it, fill NA replaces errors with NA rather than the value of the game cell
+    cum_three_pct = lag(cummean(three_pct), n = 1),
+    cum_fg_pct = lag(cummean(fg_pct), n=1),
+    cum_ppp = lag(cummean(ppp), n=1),
+    cum_true_shoot = lag(cummean(true_shooting), n=1),
+    cum_turnover_pct = lag(cummean(turnover_pct), n=1),
+    cum_ftf = lag(cummean(free_throw_factor), n=1),
+    cum_efg = lag(cummean(efg), n=1),
+    
+    r_three_pct = rollmean(lag(three_pct, n=1), k=10, align="right", fill=NA),
+    r_fg_pct = rollmean(lag(fg_pct, n=1), k=10, align="right", fill=NA),
+    r_ppp = rollmean(lag(ppp, n=1), k=10, align="right", fill=NA),
+    r_true_shoot = rollmean(lag(true_shooting, n=1), k=10, align="right", fill=NA),
+    r_turnover_pct = rollmean(lag(turnover_pct, n=1), k=10, align="right", fill=NA),
+    r_ftf = rollmean(lag(free_throw_factor, n=1), k=10, align="right", fill=NA),
+    r_efg = rollmean(lag(efg, n=1), k=10, align="right", fill=NA)
+    ) %>% 
+        mutate(team_id = as.numeric(team_id),
+               game_id = as.numeric(game_id))
+
+excluded_vars <- c("team_uid", "team_alternate_color", "team_color", "team_display_name", "team_name", "team_logo", "team_location", "team_abbreviation", "team_slug", "opponent_mascot", "opponent_abbrev", "largestLead")
+teamdata <- teamdata %>% select(-excluded_vars) %>% ungroup() 
+
+# nu1 <- teamdata %>% filter(team == "Nebraska")
+# view(nu1)
+```
+
+```{r}
+opponentdata <- teamdata %>% #select(-excluded_vars) %>%
+    rename(opponent = opponent_name,
+          opp_id=opponent_id, 
+          opp_offensive_rebounds = offensive_rebounds,
+          opp_defensive_rebounds=defensive_rebounds,
+    opp_score = team_score,
+    opp_possessions = possessions, 
+    opp_ppp = ppp, 
+    opp_true_shooting = true_shooting, 
+    opp_turnover_pct = turnover_pct,
+    opp_fgm = fgm, 
+    opp_fga = fga, 
+    opp_fg_pct = fg_pct, 
+    opp_threes = threes, 
+    opp_threes_attempted = threes_attempted, 
+    opp_three_pct = three_pct, 
+    opp_ftm = ftm, 
+    opp_fta = fta, 
+    opp_free_throw_pct = free_throw_pct, 
+    opp_free_throw_factor = free_throw_factor, 
+    opp_total_rebounds = total_rebounds, 
+    opp_offensive_rebounds = offensive_rebounds, 
+    opp_defensive_rebounds = defensive_rebounds, 
+    opp_assists = assists, 
+    opp_steals = steals, 
+    opp_blocks = blocks, 
+    opp_turnovers = turnovers, 
+    opp_fouls = fouls, 
+    opp_three_point_field_goal_pct = three_point_field_goal_pct,
+    opp_team_rebounds = team_rebounds,
+    opp_team_turnovers = team_turnovers,
+    opp_total_turnovers = total_turnovers,
+    opp_total_technical_fouls = total_technical_fouls,
+    opp_technical_fouls =technical_fouls,
+    opp_flagrant_fouls = flagrant_fouls,
+    opp_home_away = home_away,
+    opp_efg = efg,
+    opp_dummy_home_away = dummy_home_away,
+    
+    opp_cum_three_pct = cum_three_pct,
+    opp_cum_true_shoot = cum_true_shoot,
+    opp_cum_ppp = cum_ppp,
+    opp_cum_fg_pct = cum_fg_pct,
+    opp_cum_ftf = cum_ftf,
+    opp_cum_turnover_pct = cum_turnover_pct,
+    opp_cum_efg = cum_efg,
+   
+    opp_r_three_pct = r_three_pct,
+    opp_r_true_shoot = r_true_shoot,
+    opp_r_ppp = r_ppp,
+    opp_r_fg_pct = r_fg_pct,
+    opp_r_ftf = r_ftf,
+    opp_r_turnover_pct = r_turnover_pct,
+    opp_r_efg = r_efg,
+    # opp_largestLead = largestLead
+    ) %>% 
+        mutate(opp_id = as.numeric(opp_id),
+               game_id = as.numeric(game_id))
+
+
+excluded_vars <- c("opponent", "opp_id", "largest_lead")
+opponentdata <- opponentdata %>% select(-excluded_vars)
+opponentdata <- opponentdata %>% rename(opponent_name = team,
+                                        opponent_id = team_id)
+
+# nu2 <- opponentdata %>% filter(opponent_id == 158)
+# view(nu2)
+```
+
+```{r}
+bothdata <- teamdata %>% inner_join(opponentdata)
+
+# nu3 <- bothdata %>% filter(team == "Nebraska")
+# view(nu3)
+```
+
+```{r}
+bothdata <- bothdata %>% group_by(team, season) %>% mutate(
+    orb_pct = offensive_rebounds / (offensive_rebounds + opp_defensive_rebounds),
+    drb_pct = defensive_rebounds / (opp_offensive_rebounds + defensive_rebounds),
+    cum_orb_pct = lag(cummean(orb_pct), n=1),
+    cum_drb_pct = lag(cummean(drb_pct), n=1),
+    
+    r_orb_pct = rollmean(lag(orb_pct, n=1), k=10, align="right", fill=NA),
+    r_drb_pct = rollmean(lag(drb_pct, n=1), k=10, align="right", fill=NA),
+    
+    team_scoring_margin = team_score - opp_score,
+    
+    cum_score_margin = lag(cummean(team_scoring_margin), n=1),
+    cum_def_ppg = lag(cummean(opp_score), n=1),
+    cum_def_ppp = lag(cummean(opp_ppp), n=1),
+    cum_def_three_pct = lag(cummean(opp_three_pct), n=1),
+    cum_def_fg_pct = lag(cummean(opp_fg_pct), n=1),
+    cum_def_true_shoot = lag(cummean(opp_true_shooting), n=1),
+    cum_def_ftf = lag(cummean(opp_free_throw_factor), n=1),
+    cum_def_efg = lag(cummean(opp_efg), n=1),
+    cum_def_turnover_pct = lag(cummean(opp_turnover_pct), n=1), 
+    
+    r_score_margin = rollmean(lag(team_scoring_margin, n=1), k=10, align="right", fill=NA),
+    r_def_ppg = rollmean(lag(opp_score, n=1), k=10, align="right", fill=NA),
+    r_def_ppp = rollmean(lag(opp_ppp, n=1), k=10, align="right", fill=NA),
+    r_def_three_pct = rollmean(lag(opp_three_pct, n=1), k=10, align="right", fill=NA),
+    r_def_fg_pct = rollmean(lag(opp_fg_pct, n=1), k=10, align="right", fill=NA),
+    r_def_true_shoot = rollmean(lag(opp_true_shooting, n=1), k=10, align="right", fill=NA),
+    r_def_ftf = rollmean(lag(opp_free_throw_factor, n=1), k=10, align="right", fill=NA),
+    r_def_efg = rollmean(lag(opp_efg, n=1), k=10, align="right", fill=NA),
+    r_def_turnover_pct = rollmean(lag(opp_turnover_pct, n=1), k=10, align="right", fill=NA),
+    
+    possession_diff = possessions - opp_possessions
+    
+    ) %>% ungroup() %>% na.omit()
+
+# nu4 <- bothdata %>% filter(team == "Nebraska")
+# view(nu4)
+# osu4 <- bothdata %>% filter(team == "Ohio State")
+# view(osu4)
+```
+
+```{r}
+opponent_rebound_data <- bothdata %>% select(game_id, team_id, game_date, season, orb_pct, drb_pct, r_orb_pct, r_drb_pct, team_scoring_margin, r_score_margin, r_def_ppg, r_def_ppp, r_def_three_pct, r_def_fg_pct, r_def_true_shoot, r_def_ftf, r_def_efg, r_def_turnover_pct, cum_orb_pct, cum_drb_pct, cum_score_margin, cum_def_ppg, cum_def_ppp, cum_def_three_pct, cum_def_fg_pct, cum_def_true_shoot, cum_def_ftf, cum_def_efg, cum_def_turnover_pct, possession_diff) %>%
+  rename(opponent_id = team_id,
+         opp_orb_pct = orb_pct,
+         opp_drb_pct = drb_pct,
+         
+         opp_r_orb_pct = r_orb_pct,
+         opp_r_drb_pct = r_drb_pct,
+         opp_r_score_margin = r_score_margin,
+    opp_r_def_ppg = r_def_ppg,
+    opp_r_def_ppp = r_def_ppp,
+    opp_r_def_three_pct = r_def_three_pct,
+    opp_r_def_fg_pct = r_def_fg_pct,
+    opp_r_def_true_shoot =r_def_true_shoot,
+    opp_r_def_ftf = r_def_ftf,
+    opp_r_def_efg = r_def_efg,
+    opp_r_def_turnover_pct = r_def_turnover_pct,
+    opp_possession_diff = possession_diff,
+    
+    opp_cum_orb_pct = cum_orb_pct,
+    opp_cum_drb_pct = cum_drb_pct,
+    opp_cum_score_margin = cum_score_margin,
+    opp_cum_def_ppg = cum_def_ppg,
+    opp_cum_def_ppp = cum_def_ppp,
+    opp_cum_def_three_pct = cum_def_three_pct,
+    opp_cum_def_fg_pct = cum_def_fg_pct,
+    opp_cum_def_true_shoot = cum_def_true_shoot,
+    opp_cum_def_ftf = cum_def_ftf,
+    opp_cum_def_efg = cum_def_efg,
+    opp_cum_def_turnover_pct = cum_def_turnover_pct,
+    
+    
+    opp_team_scoring_margin = team_scoring_margin
+         )
+bothdatawithrebounds <- bothdata %>% inner_join(opponent_rebound_data) %>% na.omit()
+
+# nu5 <- bothdatawithrebounds %>% filter(team == "Nebraska")
+# view(nu5)
+```
+
+```{r}
+teamdatawithreboundsanddefense <- bothdatawithrebounds %>% group_by(team, season) %>% mutate(
+  score_vs_avg = team_scoring_margin + opp_r_score_margin,
+  cum_score_vs_avg = lag(cummean(score_vs_avg), n=1),
+  cum_possession_diff = lag(cummean(possession_diff), n=1),
+  
+  r_score_vs_avg = rollmean(lag(score_vs_avg, n=1), k=10, align="right", fill=NA),
+  r_possession_diff = rollmean(lag(possession_diff, n=1), k=10, align="right", fill=NA),
+) %>% ungroup() %>% na.omit()
+
+# nu6 <- teamdatawithreboundsanddefense %>% filter(team == "Nebraska")
+# view(nu6)
+```
+
+```{r}
+opponent_defense_data <- teamdatawithreboundsanddefense %>% select(game_id, team_id, game_date, season, score_vs_avg, r_score_vs_avg, r_possession_diff, cum_score_vs_avg, cum_possession_diff) %>%
+  rename(opponent_id = team_id,
+         opp_score_vs_avg = score_vs_avg,
+         opp_r_score_vs_avg = r_score_vs_avg,
+         opp_r_possession_diff = r_possession_diff,
+         
+         opp_cum_score_vs_avg = cum_score_vs_avg,
+         opp_cum_possession_diff = cum_possession_diff)
+bothdatawithreboundsanddefense <- teamdatawithreboundsanddefense %>% inner_join(opponent_defense_data) %>% na.omit()
+
+# nu7 <- bothdatawithreboundsanddefense %>% filter(team == "Nebraska")
+# view(nu7)
+# osu7 <- bothdatawithreboundsanddefense %>% filter(team == "Ohio State")
+# view(osu7)
+```
+
+```{r}
+games <- bothdatawithreboundsanddefense
+
+games <- games %>% mutate(score_margin = team_score - opp_score,
+  TeamResult = as.factor(case_when(
+    team_score > opp_score ~ "W",
+    opp_score > team_score ~ "L"
+))) %>% na.omit()
+```
+
+
+```{r}
+modelgames <- games %>% select(game_id, game_date, team, opponent_name, season, dummy_home_away,
+                               
+                               r_true_shoot, opp_r_true_shoot, 
+                               r_turnover_pct, opp_r_turnover_pct, 
+                               r_ftf, opp_r_ftf, 
+                               r_orb_pct, opp_r_orb_pct, 
+                               r_fg_pct, opp_r_fg_pct, 
+                               r_three_pct, opp_r_three_pct, 
+                               r_ppp, opp_r_ppp,
+                              
+                               r_score_vs_avg, opp_r_score_vs_avg,
+                               
+                               r_def_ppg, opp_r_def_ppg,
+                               r_def_ppp, opp_r_def_ppp,
+                               r_def_three_pct, opp_r_def_three_pct,
+                               r_def_fg_pct, opp_r_def_fg_pct,
+                               r_def_true_shoot, opp_r_def_true_shoot,
+                               r_def_ftf, opp_r_def_ftf,
+                               r_def_efg, opp_r_def_efg,
+                               r_def_turnover_pct, opp_r_def_turnover_pct,
+                               r_possession_diff, opp_r_possession_diff,
+                               
+                               #cum stats
+                               cum_true_shoot, opp_cum_true_shoot, 
+                               cum_turnover_pct, opp_cum_turnover_pct, 
+                               cum_ftf, opp_cum_ftf, 
+                               cum_orb_pct, opp_cum_orb_pct, 
+                               cum_fg_pct, opp_cum_fg_pct, 
+                               cum_three_pct, opp_cum_three_pct, 
+                               cum_ppp, opp_cum_ppp,
+                               
+                               cum_score_vs_avg, opp_cum_score_vs_avg,
+                               
+                               cum_def_ppg, opp_cum_def_ppg,
+                               cum_def_ppp, opp_cum_def_ppp,
+                               cum_def_three_pct, opp_cum_def_three_pct,
+                               cum_def_fg_pct, opp_cum_def_fg_pct,
+                               cum_def_true_shoot, opp_cum_def_true_shoot,
+                               cum_def_ftf, opp_cum_def_ftf,
+                               cum_def_efg, opp_cum_def_efg,
+                               cum_def_turnover_pct, opp_cum_def_turnover_pct,
+                               cum_possession_diff, opp_cum_possession_diff,
+                               #r_blocks, opp_r_blocks,
+                               
+                               #rolling_sos, opponent_rolling_sos,
+                               score_margin,
+                               TeamResult) %>% na.omit()
+
+```
+
+```{r}
+game_split <- initial_split(modelgames, prop = .8)
+game_train <- training(game_split)
+game_test <- testing(game_split)
+
+game_recipe <- 
+  recipe(score_margin ~ ., data = game_train) %>% 
+  update_role(game_id, game_date, team, opponent_name, season, TeamResult, 
+              new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(game_recipe)
+```
+
+```{r}
+log_mod <- 
+  logistic_reg() %>% 
+  set_engine("glm") %>%
+  set_mode("classification")
+```
+
+```{r}
+rf_mod <- 
+  rand_forest() %>% 
+  set_engine("ranger") %>%
+  set_mode("regression")
+```
+
+```{r}
+# svm_mod <-
+#   svm_poly() %>%
+#   set_engine("kernlab") %>%
+#   set_mode("classification")
+# 
+# xg_mod <-   boost_tree(
+#   trees = tune(),
+#   learn_rate = tune(),
+#   tree_depth = tune(),
+#   min_n = tune(),
+#   loss_reduction = tune(),
+#   sample_size = tune(),
+#   mtry = tune(),
+#   ) %>%
+#   set_mode("classification") %>%
+#   set_engine("xgboost")
+```
+
+```{r}
+log_workflow <- 
+  workflow() %>% 
+  add_model(log_mod) %>% 
+  add_recipe(game_recipe)
+```
+
+```{r}
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(game_recipe)
+```
+
+```{r}
+# svm_workflow <-
+#   workflow() %>%
+#   add_model(svm_mod) %>%
+#   add_recipe(game_recipe)
+# 
+# xg_wflow <-
+#   workflow() %>%
+#   add_model(xg_mod) %>%
+#   add_recipe(game_recipe)
+```
+
+```{r}
+lm_mod <- 
+  linear_reg() %>% 
+  set_engine("lm")
+
+lm_workflow <- 
+  workflow() %>% 
+  add_model(lm_mod) %>% 
+  add_recipe(game_recipe)
+
+lm_fit <- 
+  lm_workflow %>% 
+  fit(data = game_train)
+```
+
+```{r}
+lmpredict <- lm_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+```
+
+```{r}
+metrics(lmpredict, score_margin, estimate = .pred)
+```
+
+```{r}
+lmtestpredict <- lm_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+metrics(lmtestpredict, score_margin, estimate = .pred)
+```
+
+```{r}
+log_fit <- 
+  log_workflow %>% 
+  fit(data = game_train)
+```
+
+```{r}
+rf_fit <- 
+  rf_workflow %>% 
+  fit(data = game_train)
+```
+
+
+```{r}
+# svm_fit <-
+#   svm_workflow %>%
+#   fit(data = game_train)
+# 
+# xgb_grid <- grid_latin_hypercube(
+#   trees(),
+#   tree_depth(),
+#   min_n(),
+#   loss_reduction(),
+#   sample_size = sample_prop(),
+#   finalize(mtry(), game_train),
+#   learn_rate(),
+#   size = 30
+# )
+# game_folds <- vfold_cv(game_train)
+# xgb_res <- tune_grid(
+#   xg_wflow,
+#   resamples = game_folds,
+#   grid = xgb_grid,
+#   control = control_grid(save_pred = TRUE)
+# )
+# best_acc <- select_best(xgb_res, "accuracy")
+# final_xgb <- finalize_workflow(
+#   xg_wflow,
+#   best_acc
+# )
+# 
+# xg_fit <-
+#   final_xgb %>%
+#   fit(data = game_train)
+```
+
+```{r}
+logpredict <- log_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+logpredict <- log_fit %>% predict(new_data = game_train, type="prob") %>%
+  bind_cols(logpredict)
+```
+
+```{r}
+rfpredict <- rf_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+# rfpredict <- rf_fit %>% predict(new_data = game_train, type="prob") %>%
+#   bind_cols(rfpredict)
+
+# svmpredict <- svm_fit %>% predict(new_data = game_train) %>%
+#   bind_cols(game_train)
+# 
+# svmpredict <- svm_fit %>% predict(new_data = game_train, type="prob") %>%
+#   bind_cols(svmpredict)
+# 
+# xgpredict <- game_train %>%
+#   bind_cols(predict(xg_fit, game_train))
+```
+
+```{r}
+metrics(logpredict, TeamResult, .pred_class)
+```
+
+```{r}
+metrics(rfpredict, score_margin, estimate = .pred)
+```
+
+```{r}
+# metrics(svmpredict, TeamResult, .pred_class)
+```
+
+```{r}
+# metrics(xgpredict, truth = TeamResult, estimate = .pred_class)
+```
+
+
+```{r}
+logtestpredict <- log_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+logtestpredict <- log_fit %>% predict(new_data = game_test, type="prob") %>%
+  bind_cols(logtestpredict)
+
+metrics(logtestpredict, TeamResult, .pred_class)
+```
+
+```{r}
+rftestpredict <- rf_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+# rftestpredict <- rf_fit %>% predict(new_data = game_test, type="prob") %>%
+#   bind_cols(rftestpredict)
+
+metrics(rftestpredict, score_margin, estimate=.pred)
+```
+
+```{r}
+# svmtestpredict <- svm_fit %>% predict(new_data = game_test) %>%
+#   bind_cols(game_test)
+# 
+# svmtestpredict <- svm_fit %>% predict(new_data = game_test, type="prob") %>%
+#   bind_cols(svmtestpredict)
+# 
+# metrics(svmtestpredict, TeamResult, .pred_class)
+```
+
+```{r}
+# xgtestresults <- game_test %>%
+#   bind_cols(predict(xg_fit, game_test))
+# 
+# metrics(xgtestresults, truth = TeamResult, estimate = .pred_class)
+```
+
+
+```{r}
+logtestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+rftestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+# svmtestpredict %>%
+#   conf_mat(TeamResult, .pred_class)
+```

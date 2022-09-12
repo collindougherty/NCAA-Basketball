@@ -1,0 +1,72 @@
+```{r}
+library(tidyverse)
+library(gt)
+```
+
+```{r}
+# here is a vector of every team you want to project against
+opponent_names <- c("average_team")
+
+# initializing a new dataframe, empty for now
+sim_games <- data.frame(team = c(NA), opponent_name = c(NA))
+
+# a double for loop which iterates every possible combination of matchups and drops NA's and duplicates
+sim_teams <- c("Gonzaga", "Georgia State", "Boise State", "Memphis", "UConn", "New Mexico St", "Arkansas", "Vermont", "Alabama", "Texas Tech", "Montana State", "Michigan State", "Davidson", "Duke", "CSU Fullerton", "Arizona", "Seton Hall", "TCU", "Houston", "Illinois", "UAB", "Chattanooga", "Colorado State" , "Michigan", "Tennessee", "Longwood", "Ohio State", "Loyola Chicago", "Villanova", "Delaware", "Kansas", "San Diego State", "Creighton", "Iowa", "Richmond", "Providence", "S Dakota St", "LSU", "Iowa State", "Wisconsin", "Colgate", "USC", "Miami", "Auburn", "J'Ville St", "Baylor", "Norfolk State", "North Carolina", "Marquette", "Saint Mary's", "UCLA", "Akron", "Virginia Tech", "Texas", "Purdue", "Yale", "Murray State", "San Francisco", "Kentucky", "Saint Peter's", "Rutgers", "Notre Dame", "Wright State", "Bryant", "Texas Southern", "Texas A&M-CC", "Wyoming", "Indiana", "average_team")
+for(k in sim_teams){for(i in opponent_names){sim_games <- sim_games %>% add_row(team = sim_teams, opponent_name = i)}
+sim_games <- sim_games %>% na.omit()}
+sim_games <- sim_games %>% distinct(team, opponent_name)
+
+n <- nrow(sim_games)
+game_id = c(1:n)
+game_date <- rep(c("9999-01-01"),times=n)
+game_date <- as.Date(game_date)
+sim_games <- cbind(game_id, game_date, sim_games)
+
+```
+
+```{r}
+sim_games <- modelgames %>% group_by(team) %>% filter(game_date == max(game_date) & season == 2022) %>% select(-TeamResult, -starts_with("opp"), -game_id, -game_date) %>% right_join(sim_games)
+
+sim_games <- modelgames %>% group_by(opponent_name) %>% filter(game_date == max(game_date) & season == 2022) %>% ungroup() %>% select(-TeamResult, -starts_with("r"), -starts_with("cum"), -score_margin, -team, -game_id, -game_date, -season, -dummy_home_away, -game_id, -game_date) %>% right_join(sim_games) 
+
+sim_games <- sim_games %>% mutate(dummy_home_away = 0.5)
+
+sim_games <- log_fit %>% predict(new_data = sim_games) %>%
+  bind_cols(sim_games) %>% select(.pred_class, team, opponent_name, everything())
+
+sim_games <- log_fit %>% predict(new_data = sim_games, type = "prob") %>%
+  bind_cols(sim_games) %>% select(.pred_class, team, opponent_name, everything())
+```
+
+```{r}
+tabledata <- sim_games %>% select(team, .pred_W) %>% arrange(desc(.pred_W)) 
+tabledata <- tabledata %>% top_n(.pred_W, n=10)
+
+tabledata %>% gt() %>% cols_label(.pred_W = "Win%", team = "Team") %>% 
+  tab_header(title = "The Best 10 Teams in March Madness",
+             subtitle = "Ranking Teams by Their Projected Win% vs an Average 2022 Team") %>% tab_style(
+    style = cell_text(color = "black", weight = "bold"),
+    locations = cells_title("title")) %>%
+  tab_source_note(
+    source_note = md("**By:** Collin Dougherty  |  **Source:** [Sports Reference](https://www.sports-reference.com/cbb/seasons/)")) %>%
+  opt_row_striping() %>% 
+  #opt_table_lines("none") %>%
+    fmt_percent(
+    columns = c(.pred_W),
+    decimals = 1
+  )
+```
+
+
+
+```{r}
+# if issue in teams, look at modelv3 chunk where I explicitly rename 
+
+# issues:   Mississippi State, Washington State
+
+# tool to look up any given matchup
+team_of_interest <- "Baylor"
+opponent_of_interest <- "average_team"
+
+sim_games %>% filter(team == team_of_interest, opponent_name == opponent_of_interest)
+```

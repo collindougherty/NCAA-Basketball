@@ -1,0 +1,206 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(zoo)
+library(hoopR)
+library(corrr)
+```
+
+```{r}
+teamgames <- load_mbb_team_box(seasons = 2015:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:35, as.numeric)
+
+teamgames <- teamgames %>% arrange(game_date)
+```
+
+```{r}
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    true_shooting_percentage = (team_score / (2*(field_goals_attempted + (.44 * free_throws_attempted)))) * 100,
+    turnover_pct = turnovers/(field_goals_attempted + 0.44 * free_throws_attempted + turnovers),
+    free_throw_factor = free_throws_made/field_goals_attempted,
+    team_rolling_true_shooting_percentage = rollmean(lag(true_shooting_percentage, n=1), k=2, align = "right", fill=true_shooting_percentage),
+    team_rolling_turnover_percentage = rollmean(lag(turnover_pct, n=1), k=2, align = "right", fill=turnover_pct),
+    team_rolling_free_throw_factor = rollmean(lag(free_throw_factor, n=1), k=2, align = "right", fill=free_throw_factor),    
+  ) %>% ungroup()
+
+opponent <- teamstats %>% select(game_id, team_id, offensive_rebounds, defensive_rebounds) %>% rename(opponent_id=team_id, opponent_offensive_rebounds = offensive_rebounds, opponent_defensive_rebounds=defensive_rebounds) %>% mutate(opponent_id = as.numeric(opponent_id))
+
+newteamstats <- teamstats %>% 
+  inner_join(opponent) %>% 
+  mutate(
+    orb = offensive_rebounds / (offensive_rebounds + opponent_defensive_rebounds),
+    drb = defensive_rebounds / (opponent_offensive_rebounds + defensive_rebounds),
+    team_rolling_orb = rollmean(lag(orb, n=1), k=2, fill=orb),
+    team_rolling_drb = rollmean(lag(drb, n=1), k=2, fill=drb)
+    )
+
+```
+
+
+```{r}
+team_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, opponent_id, game_date, season, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb) %>% na.omit()
+```
+
+```{r}
+opponent_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb) %>% na.omit() %>%
+  rename(
+    opponent_id = team_id,
+    opponent_short_display_name = team_short_display_name,
+    opponent_score = team_score,
+    opponent_rolling_true_shooting_percentage = team_rolling_true_shooting_percentage,
+    opponent_rolling_free_throw_factor = team_rolling_free_throw_factor,
+    opponent_rolling_turnover_percentage = team_rolling_turnover_percentage,
+    opponent_rolling_orb = team_rolling_orb,
+    opponent_rolling_drb = team_rolling_drb
+  ) %>%
+  mutate(opponent_id = as.numeric(opponent_id))
+
+games <- team_side %>% inner_join(opponent_side)
+```
+
+```{r}
+modelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, team_rolling_true_shooting_percentage, opponent_rolling_true_shooting_percentage, team_rolling_turnover_percentage, opponent_rolling_turnover_percentage, TeamResult) 
+```
+
+```{r}
+levels(modelgames$TeamResult)
+```
+
+```{r}
+modelgames$TeamResult <- relevel(modelgames$TeamResult, ref="W")
+
+levels(modelgames$TeamResult)
+```
+
+```{r}
+ggplot() + 
+  geom_point(data=games, aes(x=team_rolling_true_shooting_percentage, y=opponent_rolling_true_shooting_percentage, color=TeamResult))
+```
+
+```{r}
+log_split <- initial_split(modelgames, prop = .8)
+log_train <- training(log_split)
+log_test <- testing(log_split)
+```
+
+```{r}
+log_recipe <- 
+  recipe(TeamResult ~ ., data = log_train) %>% 
+  update_role(game_id, game_date, team_short_display_name, opponent_short_display_name, season, new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(log_recipe)
+```
+
+```{r}
+log_mod <- 
+  logistic_reg() %>% 
+  set_engine("glm") %>%
+  set_mode("classification")
+```
+
+```{r}
+log_workflow <- 
+  workflow() %>% 
+  add_model(log_mod) %>% 
+  add_recipe(log_recipe)
+```
+
+```{r}
+log_fit <- 
+  log_workflow %>% 
+  fit(data = log_train)
+```
+
+```{r}
+trainpredict <- log_fit %>% predict(new_data = log_train) %>%
+  bind_cols(log_train)
+
+trainpredict
+```
+
+```{r}
+trainpredict <- log_fit %>% predict(new_data = log_train, type="prob") %>%
+  bind_cols(trainpredict)
+
+trainpredict
+```
+
+```{r}
+metrics(trainpredict, TeamResult, .pred_class)
+```
+
+```{r}
+roc_auc(trainpredict, truth = TeamResult, .pred_W)
+```
+
+```{r}
+roc_auc(trainpredict, truth = TeamResult, .pred_L)
+```
+
+
+```{r}
+trainpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+
+
+```{r}
+roc_data <- roc_curve(trainpredict, truth = TeamResult, .pred_W) 
+roc_data %>%  
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) + 
+  coord_equal()
+```
+
+```{r}
+testpredict <- log_fit %>% predict(new_data = log_test) %>%
+  bind_cols(log_test)
+
+testpredict
+```
+
+```{r}
+testpredict <- log_fit %>% predict(new_data = log_test, type="prob") %>%
+  bind_cols(testpredict)
+
+testpredict
+```
+
+
+
+```{r}
+metrics(testpredict, TeamResult, .pred_class)
+```
+
+```{r}
+testpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+roc_auc(testpredict, truth = TeamResult, .pred_W)
+```
+
+```{r}
+roc_auc(testpredict, truth = TeamResult, .pred_L)
+```
+
+```{r}
+roc_data <- roc_curve(testpredict, truth = TeamResult, .pred_W) 
+roc_data %>%  
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) + 
+  coord_equal()
+```

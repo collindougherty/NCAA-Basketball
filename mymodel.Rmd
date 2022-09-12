@@ -1,0 +1,459 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(zoo)
+library(hoopR)
+library(corrr)
+```
+
+```{r}
+teamgames <- load_mbb_team_box(seasons = 2003:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:34, as.numeric)
+teamgames <- teamgames %>% arrange(game_date)
+
+# creating stats and dataframes
+# other stats 
+  # cummean
+  # look at spreads and see if you can beat them, maybe NBA project though
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name, season) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    possessions = field_goals_attempted - offensive_rebounds + turnovers + (.475 * free_throws_attempted),
+    ppp = team_score/possessions,
+    turnover_pct = turnovers/(field_goals_attempted + 0.44 * free_throws_attempted + turnovers),
+    free_throw_factor = free_throws_made/field_goals_attempted,
+    true_shooting_percentage = (team_score / (2*(field_goals_attempted + (.44 * free_throws_attempted)))) * 100, 
+
+    team_rolling_shooting_percentage12 = rollmean(lag(field_goal_pct, n=1), k=12, align = "right", fill=NA),
+    team_rolling_ppp12 = rollmean(lag(ppp, n=1), k=12, align = "right", fill=NA),
+    team_rolling_true_shooting_percentage12 = rollmean(lag(true_shooting_percentage, n=1), k=12, align = "right", fill=NA),
+    team_rolling_turnover_percentage12 = rollmean(lag(turnover_pct, n=1), k=12, align = "right", fill=NA),
+    team_rolling_free_throw_factor12 = rollmean(lag(free_throw_factor, n=1), k=12, align = "right", fill=NA),
+    
+        team_rolling_shooting_percentage3 = rollmean(lag(field_goal_pct, n=1), k=3, align = "right", fill=NA),
+    team_rolling_ppp3 = rollmean(lag(ppp, n=1), k=3,  align = "right", fill=NA),
+    team_rolling_true_shooting_percentage3 = rollmean(lag(true_shooting_percentage, n=1), k=3,  align = "right", fill=NA),
+    team_rolling_turnover_percentage3 = rollmean(lag(turnover_pct, n=1), k=3, align = "right", fill=NA),
+    team_rolling_free_throw_factor3 = rollmean(lag(free_throw_factor, n=1), k=3, align = "right", fill=NA),
+    
+        team_rolling_shooting_percentage25 = rollmean(lag(field_goal_pct, n=1), k=25, align = "right", fill=NA),
+    team_rolling_ppp25 = rollmean(lag(ppp, n=1), k=25, align = "right", fill=NA),
+    team_rolling_true_shooting_percentage25 = rollmean(lag(true_shooting_percentage, n=1), k=25, align = "right", fill=NA),
+    team_rolling_turnover_percentage25 = rollmean(lag(turnover_pct, n=1), k=25, align = "right", fill=NA),
+    team_rolling_free_throw_factor25 = rollmean(lag(free_throw_factor, n=1), k=25, align = "right", fill=NA),
+    
+        team_rolling_shooting_percentage7 = rollmean(lag(field_goal_pct, n=1), k=7, align = "right", fill=NA),
+    team_rolling_ppp7 = rollmean(lag(ppp, n=1), k=7, align = "right", fill=NA),
+    team_rolling_true_shooting_percentage7 = rollmean(lag(true_shooting_percentage, n=1), k=7, align = "right", fill=NA),
+    team_rolling_turnover_percentage7 = rollmean(lag(turnover_pct, n=1), k=7, align = "right", fill=NA),
+    team_rolling_free_throw_factor7 = rollmean(lag(free_throw_factor, n=1), k=7, align = "right", fill=NA),
+    
+        team_rolling_shooting_percentage9 = rollmean(lag(field_goal_pct, n=1), k=9, align = "right", fill=NA),
+    team_rolling_ppp9 = rollmean(lag(ppp, n=1), k=9, align = "right", fill=NA),
+    team_rolling_true_shooting_percentage9 = rollmean(lag(true_shooting_percentage, n=1), k=9, align = "right", fill=NA),
+    team_rolling_turnover_percentage9 = rollmean(lag(turnover_pct, n=1), k=9, align = "right", fill=NA),
+    team_rolling_free_throw_factor9 = rollmean(lag(free_throw_factor, n=1), k=9, align = "right", fill=NA),
+    
+      team_rolling_shooting_percentage20 = rollmean(lag(field_goal_pct, n=1), k=20, align = "right", fill=NA),
+    team_rolling_ppp20 = rollmean(lag(ppp, n=1), k=20, align = "right", fill=NA),
+    team_rolling_true_shooting_percentage20 = rollmean(lag(true_shooting_percentage, n=1), k=20, align = "right", fill=NA),
+    team_rolling_turnover_percentage20 = rollmean(lag(turnover_pct, n=1), k=20, align = "right", fill=NA),
+    team_rolling_free_throw_factor20 = rollmean(lag(free_throw_factor, n=1), k=20, align = "right", fill=NA),
+    
+    dummy_home_away = ifelse(home_away == "HOME", 1, 0),
+    
+    effective_field_goal_pct = (field_goals_made + .5*three_point_field_goals_made)/field_goals_attempted,
+    
+    three_point_field_goal_pct = as.numeric(three_point_field_goal_pct)) %>% ungroup()
+    
+teamstats <- teamstats %>% group_by(team_short_display_name, season) %>% mutate(
+    pace = possessions/mean(teamstats$possessions, na.rm = TRUE),
+    team_rolling_pace7 = rollmean(lag(pace, n = 1), k=7, align = "right", fill = NA),
+    team_rolling_three_point_percentage7 = rollmean(lag(three_point_field_goal_pct, n = 1), k=7, align = "right", fill=NA)) %>% ungroup()
+
+
+
+opponent <- teamstats %>% select(game_id, team_id, offensive_rebounds, defensive_rebounds) %>% rename(opponent_id=team_id, opponent_offensive_rebounds = offensive_rebounds, opponent_defensive_rebounds=defensive_rebounds) %>% mutate(opponent_id = as.numeric(opponent_id))
+
+newteamstats <- teamstats %>% 
+  inner_join(opponent) %>% group_by(team_short_display_name, season) %>%
+  mutate(
+    orb = offensive_rebounds / (offensive_rebounds + opponent_defensive_rebounds),
+    drb = defensive_rebounds / (opponent_offensive_rebounds + defensive_rebounds),
+    team_rolling_orb12 = rollmean(lag(orb, n=1), k=12, align = "right",fill=NA),
+    team_rolling_drb12 = rollmean(lag(drb, n=1), k=12,  align = "right",fill=NA),
+    
+    team_rolling_orb3 = rollmean(lag(orb, n=1), k=3,  align = "right",fill=NA),
+    team_rolling_drb3 = rollmean(lag(drb, n=1), k=3,  align = "right",fill=NA),
+    
+    team_rolling_orb25 = rollmean(lag(orb, n=1), k=25,  align = "right",fill=NA),
+    team_rolling_drb25 = rollmean(lag(drb, n=1), k=25,  align = "right",fill=NA),
+    
+    team_rolling_orb7 = rollmean(lag(orb, n=1), k=7,  align = "right",fill=NA),
+    team_rolling_drb7 = rollmean(lag(drb, n=1), k=7,  align = "right",fill=NA),
+    
+    team_rolling_orb9 = rollmean(lag(orb, n=1), k=9,  align = "right",fill=NA),
+    team_rolling_drb9 = rollmean(lag(drb, n=1), k=9,  align = "right",fill=NA),
+    
+    team_rolling_orb20 = rollmean(lag(orb, n=1), k=20, align = "right",fill=NA),
+    team_rolling_drb20 = rollmean(lag(drb, n=1), k=20,  align = "right",fill=NA)
+    ) %>% ungroup()
+
+
+team_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, opponent_id, game_date, home_away, season, team_score, possessions, ppp, true_shooting_percentage, turnover_pct, field_goals_made, field_goals_attempted, field_goal_pct, three_point_field_goals_made, three_point_field_goals_attempted, three_point_field_goal_pct, free_throws_made, free_throws_attempted, free_throw_pct, free_throw_factor, total_rebounds, offensive_rebounds, defensive_rebounds, assists, steals, blocks, turnovers, fouls, largest_lead, pace, team_rolling_pace7, team_rolling_three_point_percentage7,
+         
+          team_rolling_ppp12,  team_rolling_ppp3,  team_rolling_ppp25,  team_rolling_ppp7,  team_rolling_ppp9,  team_rolling_ppp20, 
+         
+         team_rolling_shooting_percentage12, team_rolling_shooting_percentage3, team_rolling_shooting_percentage25, team_rolling_shooting_percentage7, team_rolling_shooting_percentage9, team_rolling_shooting_percentage20, 
+         
+         team_rolling_true_shooting_percentage12, team_rolling_true_shooting_percentage3, team_rolling_true_shooting_percentage25, team_rolling_true_shooting_percentage7, team_rolling_true_shooting_percentage9, team_rolling_true_shooting_percentage20,
+         
+         team_rolling_free_throw_factor12, team_rolling_free_throw_factor3, team_rolling_free_throw_factor25, team_rolling_free_throw_factor7, team_rolling_free_throw_factor9, team_rolling_free_throw_factor20,
+         
+         team_rolling_turnover_percentage12, team_rolling_turnover_percentage3, team_rolling_turnover_percentage25, team_rolling_turnover_percentage7, team_rolling_turnover_percentage9, team_rolling_turnover_percentage20,
+         
+         team_rolling_orb12, team_rolling_drb12, team_rolling_orb3, team_rolling_drb3, team_rolling_orb25, team_rolling_drb25, team_rolling_orb7, team_rolling_drb7, team_rolling_orb9, team_rolling_drb9, team_rolling_orb20, team_rolling_drb20,
+         
+         dummy_home_away)
+
+
+
+opponent_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, team_score, possessions, ppp, true_shooting_percentage, turnover_pct, field_goals_made, field_goals_attempted, field_goal_pct, three_point_field_goals_made, three_point_field_goals_attempted, three_point_field_goal_pct, free_throws_made, free_throws_attempted, free_throw_pct, free_throw_factor, total_rebounds, offensive_rebounds, defensive_rebounds, assists, steals, blocks, turnovers, fouls, largest_lead, pace, team_rolling_pace7, team_rolling_three_point_percentage7,
+         
+          team_rolling_ppp12,  team_rolling_ppp3,  team_rolling_ppp25,  team_rolling_ppp7,  team_rolling_ppp9,  team_rolling_ppp20, 
+         
+         team_rolling_shooting_percentage12, team_rolling_shooting_percentage3, team_rolling_shooting_percentage25, team_rolling_shooting_percentage7, team_rolling_shooting_percentage9, team_rolling_shooting_percentage20, 
+         
+         team_rolling_true_shooting_percentage12, team_rolling_true_shooting_percentage3, team_rolling_true_shooting_percentage25, team_rolling_true_shooting_percentage7, team_rolling_true_shooting_percentage9, team_rolling_true_shooting_percentage20,
+         
+         team_rolling_free_throw_factor12, team_rolling_free_throw_factor3, team_rolling_free_throw_factor25, team_rolling_free_throw_factor7, team_rolling_free_throw_factor9, team_rolling_free_throw_factor20,
+         
+         team_rolling_turnover_percentage12, team_rolling_turnover_percentage3, team_rolling_turnover_percentage25, team_rolling_turnover_percentage7, team_rolling_turnover_percentage9, team_rolling_turnover_percentage20,
+         
+         team_rolling_orb12, team_rolling_drb12, team_rolling_orb3, team_rolling_drb3, team_rolling_orb25, team_rolling_drb25, team_rolling_orb7, team_rolling_drb7, team_rolling_orb9, team_rolling_drb9, team_rolling_orb20, team_rolling_drb20) %>%
+  
+  rename(
+    opponent_id = team_id,
+    opponent_short_display_name = team_short_display_name,
+    opponent_score = team_score,
+    
+    opponent_possessions = possessions, 
+    opponent_ppp = ppp, 
+    opponent_true_shooting_percentage = true_shooting_percentage, 
+    opponent_turnover_pct = turnover_pct,
+    opponent_field_goals_made = field_goals_made, 
+    opponent_field_goals_attempted = field_goals_attempted, 
+    opponent_field_goal_pct = field_goal_pct, 
+    opponent_three_point_field_goals_made = three_point_field_goals_made, 
+    opponent_three_point_field_goals_attempted = three_point_field_goals_attempted, 
+    opponent_three_point_field_goal_pct = three_point_field_goal_pct, 
+    opponent_free_throws_made = free_throws_made, 
+    opponent_free_throws_attempted = free_throws_attempted, 
+    opponent_free_throw_pct = free_throw_pct, 
+    opponent_free_throw_factor = free_throw_factor, 
+    opponent_total_rebounds = total_rebounds, 
+    opponent_offensive_rebounds = offensive_rebounds, 
+    opponent_defensive_rebounds = defensive_rebounds, 
+    opponent_assists = assists, 
+    opponent_steals = steals, 
+    opponent_blocks = blocks, 
+    opponent_turnovers = turnovers, 
+    opponent_fouls = fouls, 
+    opponent_largest_lead = largest_lead,
+    opponent_pace = pace,
+    opponent_rolling_pace7 = team_rolling_pace7,
+    opponent_rolling_three_point_percentage7 = team_rolling_three_point_percentage7,
+    
+    opponent_rolling_true_shooting_percentage12 = team_rolling_true_shooting_percentage12,
+    opponent_rolling_ppp12 = team_rolling_ppp12,
+    opponent_rolling_shooting_percentage12 = team_rolling_shooting_percentage12,
+    opponent_rolling_free_throw_factor12 = team_rolling_free_throw_factor12,
+    opponent_rolling_turnover_percentage12 = team_rolling_turnover_percentage12,
+    opponent_rolling_orb12 = team_rolling_orb12,
+    opponent_rolling_drb12 = team_rolling_drb12,
+    
+    opponent_rolling_true_shooting_percentage3 = team_rolling_true_shooting_percentage3,
+    opponent_rolling_shooting_percentage3 = team_rolling_shooting_percentage3,
+    opponent_rolling_ppp3 = team_rolling_ppp3,
+    opponent_rolling_free_throw_factor3 = team_rolling_free_throw_factor3,
+    opponent_rolling_turnover_percentage3 = team_rolling_turnover_percentage3,
+    opponent_rolling_orb3 = team_rolling_orb3,
+    opponent_rolling_drb3 = team_rolling_drb3,
+    
+    opponent_rolling_true_shooting_percentage25 = team_rolling_true_shooting_percentage25,
+    opponent_rolling_shooting_percentage25 = team_rolling_shooting_percentage25,
+    opponent_rolling_ppp25 = team_rolling_ppp25,
+    opponent_rolling_free_throw_factor25 = team_rolling_free_throw_factor25,
+    opponent_rolling_turnover_percentage25 = team_rolling_turnover_percentage25,
+    opponent_rolling_orb25 = team_rolling_orb25,
+    opponent_rolling_drb25 = team_rolling_drb25,
+    
+    opponent_rolling_true_shooting_percentage7 = team_rolling_true_shooting_percentage7,
+    opponent_rolling_shooting_percentage7 = team_rolling_shooting_percentage7,
+    opponent_rolling_ppp7 = team_rolling_ppp7,
+    opponent_rolling_free_throw_factor7 = team_rolling_free_throw_factor7,
+    opponent_rolling_turnover_percentage7 = team_rolling_turnover_percentage7,
+    opponent_rolling_orb7 = team_rolling_orb7,
+    opponent_rolling_drb7 = team_rolling_drb7,
+    
+    opponent_rolling_true_shooting_percentage9 = team_rolling_true_shooting_percentage9,
+    opponent_rolling_shooting_percentage9 = team_rolling_shooting_percentage9,
+    opponent_rolling_ppp9 = team_rolling_ppp9,
+    opponent_rolling_free_throw_factor9 = team_rolling_free_throw_factor9,
+    opponent_rolling_turnover_percentage9 = team_rolling_turnover_percentage9,
+    opponent_rolling_orb9 = team_rolling_orb9,
+    opponent_rolling_drb9 = team_rolling_drb9,
+    
+    opponent_rolling_true_shooting_percentage20 = team_rolling_true_shooting_percentage20,
+    opponent_rolling_shooting_percentage20 = team_rolling_shooting_percentage20,
+    opponent_rolling_ppp20 = team_rolling_ppp20,
+    opponent_rolling_free_throw_factor20 = team_rolling_free_throw_factor20,
+    opponent_rolling_turnover_percentage20 = team_rolling_turnover_percentage20,
+    opponent_rolling_orb20 = team_rolling_orb20,
+    opponent_rolling_drb20 = team_rolling_drb20
+  ) %>%
+  mutate(opponent_id = as.numeric(opponent_id))
+
+games <- team_side %>% inner_join(opponent_side)
+
+games <- games %>% mutate(
+  TeamResult = as.factor(case_when(
+    team_score > opponent_score ~ "W",
+    opponent_score > team_score ~ "L"
+)))
+
+games <- team_side <- games %>% group_by(team_short_display_name, season) %>%
+                    mutate(margin = team_score - opponent_score,
+                          rolling_defense_ppg = rollmean(lag(opponent_score, n=1), k=12, align = "right", fill = NA),
+                          rolling_defense_ppp = rollmean(lag(opponent_ppp, n=1), k=12, align = "right", fill = NA),
+                          rolling_defense_free_throw_factor  = rollmean(lag(opponent_free_throw_factor, n=1), k=12, align = "right", fill = NA),
+                          rolling_defense_turnover_pct = rollmean(lag(opponent_turnover_pct, n=1), k=12, align = "right", fill = NA),
+                          rolling_defense_three_point_pct = rollmean(lag(opponent_three_point_field_goal_pct, n=1), k=12, align = "right", fill = NA),
+                          rolling_defense_shooting_pct = rollmean(lag(opponent_field_goal_pct, n=1), k=12, align = "right", fill = NA),
+                          rolling_defense_true_shooting_pct = rollmean(lag(opponent_true_shooting_percentage, n=1), k=12, align = "right", fill = NA),
+                          rolling_defense_blocks = rollmean(lag(blocks, n=1), k=12, align = "right", fill = NA)) %>% ungroup()
+
+
+opponent_side <- games %>%
+  select(game_id, team_id, team_short_display_name, game_date, season, 
+         rolling_defense_ppg, rolling_defense_ppp, rolling_defense_free_throw_factor, rolling_defense_blocks, rolling_defense_shooting_pct, rolling_defense_three_point_pct, rolling_defense_true_shooting_pct, rolling_defense_turnover_pct) %>%
+  
+  rename(opponent_id = team_id,
+        opponent_short_display_name = team_short_display_name,
+        opponent_rolling_defense_ppp = rolling_defense_ppp,
+         opponent_rolling_defense_ppg = rolling_defense_ppg,
+         opponent_rolling_defense_free_throw_factor = rolling_defense_free_throw_factor,
+         opponent_rolling_defense_blocks = rolling_defense_blocks,
+         opponent_rolling_defense_shooting_pct = rolling_defense_shooting_pct,
+         opponent_rolling_defense_three_point_pct = rolling_defense_three_point_pct,
+         opponent_rolling_defense_true_shooting_pct = rolling_defense_true_shooting_pct,
+         opponent_rolling_defense_turnover_pct = rolling_defense_turnover_pct) %>%
+  mutate(opponent_id = as.numeric(opponent_id))
+
+games <- team_side %>% inner_join(opponent_side)
+
+games$TeamResult <- relevel(games$TeamResult, ref="W")
+
+levels(games$TeamResult)
+```
+
+```{r}
+games <- games %>% group_by(team_short_display_name, season) %>% mutate('oTS+' = 100*team_rolling_true_shooting_percentage12/mean(games$team_rolling_true_shooting_percentage12, na.rm = TRUE),
+                                  'oFT+' =100*team_rolling_free_throw_factor12/mean(games$team_rolling_free_throw_factor12, na.rm = TRUE),
+                                  'oTO+' =100*team_rolling_turnover_percentage12/mean(games$team_rolling_turnover_percentage12, na.rm = TRUE),
+                                  'oRB+' =100*team_rolling_orb12/mean(games$team_rolling_orb12, na.rm = TRUE),
+                                  'dRB+' =100*team_rolling_drb12/mean(games$team_rolling_drb12, na.rm = TRUE),
+                                  'oSh+' =100*team_rolling_shooting_percentage12/mean(games$team_rolling_shooting_percentage12, na.rm = TRUE),
+                                  'o3p+' =100*team_rolling_three_point_percentage7/mean(games$team_rolling_three_point_percentage7, na.rm = TRUE),
+                                  'oPPP+' =100*team_rolling_ppp12/mean(games$team_rolling_ppp12, na.rm = TRUE),
+                                 
+                                  'dPPG+' =100*rolling_defense_ppg/mean(games$rolling_defense_ppg, na.rm = TRUE),
+                                  'dPPP+'=100*rolling_defense_ppp/mean(games$rolling_defense_ppp, na.rm = TRUE),
+                                  'dFT+' =100*rolling_defense_free_throw_factor/mean(games$rolling_defense_free_throw_factor, na.rm = TRUE),
+                                  'dBlck+' =100*rolling_defense_blocks/mean(games$rolling_defense_blocks, na.rm = TRUE),
+                                  'dSh+' =100*rolling_defense_shooting_pct/mean(games$rolling_defense_shooting_pct, na.rm = TRUE),
+                                  'd3p+' =100*rolling_defense_three_point_pct/mean(games$rolling_defense_three_point_pct, na.rm = TRUE),
+                                  'dTS+' =100*rolling_defense_true_shooting_pct/mean(games$rolling_defense_true_shooting_pct, na.rm = TRUE),
+                                  'dTO+' =100*rolling_defense_turnover_pct/mean(games$rolling_defense_turnover_pct, na.rm = TRUE),
+                                   'O+' = (`oTS+` + `oFT+` + `oTO+` + `oRB+` + `oSh+` + `o3p+` + `oPPP+`)/7,
+                                  'D+' = (`dRB+` + `dPPG+` + `dPPP+` + `dFT+` + `dBlck+` + `dSh+` + `d3p+` + `dTS+` + `dTO+`)/9,
+                                  rating = (`O+` + `D+`)/2,
+                          rolling_rating =  rollmean(lag(rating, n=1),k=12,align="right",fill=NA)
+                          ) %>% ungroup()
+
+opponent_side <- games %>%
+  select(game_id, team_id, team_short_display_name, game_date, season, rolling_rating) %>%
+  rename(opponent_id = team_id,
+          opponent_short_display_name = team_short_display_name,
+         opponent_rolling_rating = rolling_rating) %>%
+  mutate(opponent_id = as.numeric(opponent_id))
+
+games <- games %>% inner_join(opponent_side)
+
+games <- games %>% mutate(rolling_sos = rollmean(lag(opponent_rolling_rating, n=1), k=12, align="right",fill=NA)
+)
+
+opponent_side <- games %>%
+  select(game_id, team_id, team_short_display_name, game_date, season, rolling_sos) %>%
+  rename(opponent_id = team_id,
+         opponent_short_display_name = team_short_display_name,
+         opponent_rolling_sos = rolling_sos) %>%
+  mutate(opponent_id = as.numeric(opponent_id))
+
+games <- games %>% inner_join(opponent_side)
+
+```
+
+```{r}
+modelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, dummy_home_away,
+                               
+                               team_rolling_true_shooting_percentage12, opponent_rolling_true_shooting_percentage12, team_rolling_turnover_percentage12, opponent_rolling_turnover_percentage12, team_rolling_free_throw_factor12, opponent_rolling_free_throw_factor12, team_rolling_orb12, team_rolling_drb12, team_rolling_shooting_percentage12, opponent_rolling_shooting_percentage12, team_rolling_three_point_percentage7, opponent_rolling_three_point_percentage7, team_rolling_ppp12, opponent_rolling_ppp12,
+                               
+                               rolling_defense_ppg, rolling_defense_ppp, rolling_defense_free_throw_factor, rolling_defense_blocks, rolling_defense_shooting_pct, rolling_defense_three_point_pct, rolling_defense_true_shooting_pct, rolling_defense_turnover_pct, opponent_rolling_defense_ppg, opponent_rolling_defense_ppp, opponent_rolling_defense_free_throw_factor, opponent_rolling_defense_blocks, opponent_rolling_defense_shooting_pct, opponent_rolling_defense_three_point_pct, opponent_rolling_defense_true_shooting_pct, opponent_rolling_defense_turnover_pct,
+                               
+                               rolling_sos, opponent_rolling_sos,
+                               
+                               TeamResult) %>% na.omit()
+
+```
+
+```{r}
+game_split <- initial_split(modelgames, prop = .8)
+game_train <- training(game_split)
+game_test <- testing(game_split)
+
+game_recipe <- 
+  recipe(TeamResult ~ ., data = game_train) %>% 
+  update_role(game_id, game_date, team_short_display_name, opponent_short_display_name, season,
+              new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(game_recipe)
+```
+
+```{r}
+log_mod <- 
+  logistic_reg() %>% 
+  set_engine("glm") %>%
+  set_mode("classification")
+
+rf_mod <- 
+  rand_forest() %>% 
+  set_engine("ranger") %>%
+  set_mode("classification")
+```
+
+```{r}
+log_workflow <- 
+  workflow() %>% 
+  add_model(log_mod) %>% 
+  add_recipe(game_recipe)
+
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(game_recipe)
+```
+
+```{r}
+log_fit <- 
+  log_workflow %>% 
+  fit(data = game_train)
+
+rf_fit <- 
+  rf_workflow %>% 
+  fit(data = game_train)
+```
+
+```{r}
+logpredict <- log_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+logpredict <- log_fit %>% predict(new_data = game_train, type="prob") %>%
+  bind_cols(logpredict)
+
+rfpredict <- rf_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+rfpredict <- rf_fit %>% predict(new_data = game_train, type="prob") %>%
+  bind_cols(rfpredict)
+```
+
+```{r}
+metrics(logpredict, TeamResult, .pred_class)
+```
+
+```{r}
+metrics(rfpredict, TeamResult, .pred_class)
+```
+
+```{r}
+logtestpredict <- log_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+logtestpredict <- log_fit %>% predict(new_data = game_test, type="prob") %>%
+  bind_cols(logtestpredict)
+
+metrics(logtestpredict, TeamResult, .pred_class)
+```
+
+```{r}
+rftestpredict <- rf_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+rftestpredict <- rf_fit %>% predict(new_data = game_test, type="prob") %>%
+  bind_cols(rftestpredict)
+
+metrics(rftestpredict, TeamResult, .pred_class)
+```
+
+
+```{r}
+logtestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+rftestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+
+```{r}
+nu <- modelgames %>% filter(team_short_display_name == "Nebraska" & season == 2022) %>% arrange(game_date)
+
+nulogpredict <- log_fit %>% predict(new_data = nu) %>%
+  bind_cols(nu)
+
+nulogpredict <- log_fit %>% predict(new_data = nu, type="prob") %>%
+  bind_cols(nulogpredict)
+
+nulogpredict %>% select(.pred_class, TeamResult, opponent_short_display_name, everything())
+```
+
+```{r}
+nurfpredict <- rf_fit %>% predict(new_data = nu) %>%
+  bind_cols(nu)
+
+nurfpredict <- rf_fit %>% predict(new_data = nu, type="prob") %>%
+  bind_cols(nurfpredict)
+
+nurfpredict %>% select(.pred_class, TeamResult, opponent_short_display_name, everything())
+```
+```{r}
+recentgames <- modelgames %>% filter(game_date > "2022-03-01") %>% arrange(game_date)
+
+recentlogpredict <- log_fit %>% predict(new_data = recentgames) %>%
+  bind_cols(recentgames)
+
+recentlogpredict <- log_fit %>% predict(new_data = recentgames, type="prob") %>%
+  bind_cols(recentlogpredict)
+
+recentlogpredict %>% select(.pred_class, TeamResult, opponent_short_display_name, everything())
+```

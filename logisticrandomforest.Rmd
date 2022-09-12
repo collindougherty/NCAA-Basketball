@@ -1,0 +1,202 @@
+From the confusion matrices below and the accuracy ratings we can see that both the random forest and the logistic linear regression produced similar accuracy ratings. The random forest once again had a significant dropoff from training data predicitions to test data, while the logistic model maintained its robustness. As for the Northwestern game, both the random forest and the logistic regression predicted a loss. It is safe to say you would not have made the same bet.
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(zoo)
+library(hoopR)
+
+set.seed(1234)
+```
+
+```{r}
+teamgames <- load_mbb_team_box(seasons = 2015:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:34, as.numeric)
+
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    true_shooting_percentage = (team_score / (2*(field_goals_attempted + (.44 * free_throws_attempted)))) * 100,
+    turnover_pct = turnovers/(field_goals_attempted + 0.44 * free_throws_attempted + turnovers),
+    free_throw_factor = free_throws_made/field_goals_attempted,
+    team_rolling_true_shooting_percentage = rollmean(lag(true_shooting_percentage, n=1), k=10, align="right", fill=NA),
+    team_rolling_turnover_percentage = rollmean(lag(turnover_pct, n=1), k=10, align="right", fill=NA),
+    team_rolling_free_throw_factor = rollmean(lag(free_throw_factor, n=1), k=10, align="right", fill=NA),
+    dummy_home_away = ifelse(home_away == "HOME", 1, 0)
+  ) %>% ungroup()
+
+opponent <- teamstats %>% select(game_id, team_id, offensive_rebounds, defensive_rebounds) %>% rename(opponent_id=team_id, opponent_offensive_rebounds = offensive_rebounds, opponent_defensive_rebounds=defensive_rebounds) %>% mutate(opponent_id = as.numeric(opponent_id))
+
+newteamstats <- teamstats %>% 
+  inner_join(opponent) %>% 
+  mutate(
+    orb = offensive_rebounds / (offensive_rebounds + opponent_defensive_rebounds),
+    drb = defensive_rebounds / (opponent_offensive_rebounds + defensive_rebounds),
+    team_rolling_orb = rollmean(lag(orb, n=1), k=10, align="right", fill=NA),
+    team_rolling_drb = rollmean(lag(drb, n=1), k=10, align="right", fill=NA)
+    )
+```
+
+```{r}
+team_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, opponent_id, game_date, season, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb, dummy_home_away) %>% na.omit()
+
+opponent_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb) %>% na.omit() %>%
+  rename(
+    opponent_id = team_id,
+    opponent_short_display_name = team_short_display_name,
+    opponent_score = team_score,
+    opponent_rolling_true_shooting_percentage = team_rolling_true_shooting_percentage,
+    opponent_rolling_free_throw_factor = team_rolling_free_throw_factor,
+    opponent_rolling_turnover_percentage = team_rolling_turnover_percentage,
+    opponent_rolling_orb = team_rolling_orb,
+    opponent_rolling_drb = team_rolling_drb
+  ) %>%
+  mutate(opponent_id = as.numeric(opponent_id))
+
+games <- team_side %>% inner_join(opponent_side) %>% mutate(
+  TeamResult = as.factor(case_when(
+    team_score > opponent_score ~ "W",
+    opponent_score > team_score ~ "L"
+))) %>% na.omit()
+```
+
+```{r}
+games$TeamResult <- relevel(games$TeamResult, ref="W")
+
+modelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, team_rolling_true_shooting_percentage, opponent_rolling_true_shooting_percentage, team_rolling_turnover_percentage, opponent_rolling_turnover_percentage, dummy_home_away, team_rolling_free_throw_factor, team_rolling_orb, team_rolling_drb, TeamResult) 
+```
+
+
+
+```{r}
+game_split <- initial_split(modelgames, prop = .8)
+game_train <- training(game_split)
+game_test <- testing(game_split)
+```
+
+```{r}
+game_recipe <- 
+  recipe(TeamResult ~ ., data = game_train) %>% 
+  update_role(game_id, game_date, team_short_display_name, opponent_short_display_name, season, new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(game_recipe)
+```
+
+```{r}
+log_mod <- 
+  logistic_reg() %>% 
+  set_engine("glm") %>%
+  set_mode("classification")
+
+rf_mod <- 
+  rand_forest() %>% 
+  set_engine("ranger") %>%
+  set_mode("classification")
+```
+
+```{r}
+log_workflow <- 
+  workflow() %>% 
+  add_model(log_mod) %>% 
+  add_recipe(game_recipe)
+
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(game_recipe)
+```
+
+```{r}
+log_fit <- 
+  log_workflow %>% 
+  fit(data = game_train)
+
+rf_fit <- 
+  rf_workflow %>% 
+  fit(data = game_train)
+```
+
+```{r}
+logpredict <- log_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+logpredict <- log_fit %>% predict(new_data = game_train, type="prob") %>%
+  bind_cols(logpredict)
+
+rfpredict <- rf_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+rfpredict <- rf_fit %>% predict(new_data = game_train, type="prob") %>%
+  bind_cols(rfpredict)
+```
+
+```{r}
+metrics(logpredict, TeamResult, .pred_class)
+```
+
+```{r}
+metrics(rfpredict, TeamResult, .pred_class)
+```
+
+```{r}
+logtestpredict <- log_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+logtestpredict <- log_fit %>% predict(new_data = game_test, type="prob") %>%
+  bind_cols(logtestpredict)
+
+metrics(logtestpredict, TeamResult, .pred_class)
+```
+
+```{r}
+rftestpredict <- rf_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+rftestpredict <- rf_fit %>% predict(new_data = game_test, type="prob") %>%
+  bind_cols(rftestpredict)
+
+metrics(rftestpredict, TeamResult, .pred_class)
+```
+
+
+```{r}
+logtestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+rftestpredict %>%
+  conf_mat(TeamResult, .pred_class)
+```
+
+```{r}
+nu <- modelgames %>% filter(team_short_display_name == "Nebraska" & season == 2022) %>% arrange(game_date)
+
+nulogpredict <- log_fit %>% predict(new_data = nu) %>%
+  bind_cols(nu)
+
+nulogpredict <- log_fit %>% predict(new_data = nu, type="prob") %>%
+  bind_cols(nulogpredict)
+
+nulogpredict %>% select(.pred_class, TeamResult, opponent_short_display_name, everything())
+```
+
+```{r}
+nurfpredict <- rf_fit %>% predict(new_data = nu) %>%
+  bind_cols(nu)
+
+nurfpredict <- rf_fit %>% predict(new_data = nu, type="prob") %>%
+  bind_cols(nurfpredict)
+
+nurfpredict %>% select(.pred_class, TeamResult, opponent_short_display_name, everything())
+```
+

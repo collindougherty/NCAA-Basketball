@@ -1,0 +1,58 @@
+```{r}
+# note that this takes about 2 hours per season
+data <- data %>% mutate_at(1, as.numeric)
+game_ids <- as.numeric(data$game_id)
+
+#espn <- espn_mbb_betting(401365200)
+
+spreads <- data.frame(game_id = c(0), margin = c(0), awayfavored = c(FALSE))
+
+fun <- function(x){espn <- espn_mbb_betting(x)
+spread <- espn$pickcenter[3]
+favoriteaway <- espn$pickcenter[8]
+spread <- spread[1,]
+favoriteaway <- favoriteaway[1,]
+spreads <<- spreads %>% add_row(game_id = x, margin = spread, awayfavored = favoriteaway)}
+
+# err <- function(e){spreads <<- spreads %>% add_row(game_id = e, margin = NA, awayfavored = NA)}
+
+for (k in game_ids){
+tryCatch(expr = fun(k), error = function(k){spreads <<- spreads %>% add_row(game_id = NA, margin = NA, awayfavored = NA)})}
+```
+
+```{r}
+spreadsunique <- spreads %>% distinct()
+datawspreads <- data %>% inner_join(spreadsunique)
+```
+
+```{r}
+datawspreads <- datawspreads %>% mutate(vegas_favorite = ifelse((awayfavored == 1 & home_away == "AWAY"), 1, ifelse((awayfavored == 0 & home_away == "HOME"), 1, 0))
+                                        )
+```
+
+```{r}
+datawspreads <- datawspreads %>% mutate(abs_margin = abs(margin))
+
+datawspreads <- datawspreads %>% mutate(vegas_score_margin = ifelse((vegas_favorite == 1), abs_margin, -abs_margin))
+
+spreaddata <- datawspreads %>% select(opponent_name, game_id, vegas_score_margin)
+```
+
+```{r}
+predicted <- lmtestpredict %>% inner_join(spreaddata)
+```
+
+```{r}
+predicted <- predicted %>% mutate(model_diff_from_vegas = vegas_score_margin - .pred)
+
+modeldifferences <- predicted %>% select(team, opponent_name, game_date, vegas_score_margin, .pred, model_diff_from_vegas, score_margin, TeamResult) %>% filter(abs(model_diff_from_vegas)>10)
+
+modeldifferences <- modeldifferences %>% mutate(cover.pred = ifelse((.pred - vegas_score_margin > 0),1,0),
+                                                covered = ifelse((score_margin - vegas_score_margin > 0),1, 0),
+                                                correct = ifelse((cover.pred == covered), 1, 0))
+```
+
+```{r}
+modeldifferences %>% cumsum(correct)
+```
+

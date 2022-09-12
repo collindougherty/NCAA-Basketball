@@ -1,0 +1,172 @@
+```{r}
+# results were good. model improved on random forest while reducing variance with an r squared of slighlty greater than 0.5
+library(tidyverse)
+library(tidymodels)
+library(zoo)
+library(hoopR)
+
+set.seed(1234)
+
+kenpom <- read.csv('ratings.csv')
+```
+
+```{r}
+teamgames <- load_mbb_team_box(seasons = 2015:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:35, as.numeric)
+```
+
+```{r}
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    possessions = field_goals_attempted - offensive_rebounds + turnovers + (.475 * free_throws_attempted),
+    ppp = team_score/possessions,
+    true_shooting_percentage = (team_score / (2*(field_goals_attempted + (.44 * free_throws_attempted)))) * 100,
+    turnover_pct = turnovers/(field_goals_attempted + 0.44 * free_throws_attempted + turnovers),
+    free_throw_factor = free_throws_made/field_goals_attempted,
+    rolling_shooting_percentage = rollmean(lag(field_goal_pct, n=1), k=2, fill=field_goal_pct),
+    rolling_ppp = rollmean(lag(ppp, n=1), k=2, fill=ppp),
+    rolling_true_shooting_percentage = rollmean(lag(true_shooting_percentage, n=1), k=2, fill=true_shooting_percentage),
+    rolling_turnover_percentage = rollmean(lag(turnover_pct, n=1), k=2, fill=turnover_pct),
+    rolling_free_throw_factor = rollmean(lag(free_throw_factor, n=1), k=2, fill=free_throw_factor),    
+  ) %>% ungroup()
+
+opponent <- teamstats %>% select(game_id, team_id, offensive_rebounds, defensive_rebounds) %>% rename(opponent_id=team_id, opponent_offensive_rebounds = offensive_rebounds, opponent_defensive_rebounds=defensive_rebounds) %>% mutate(opponent_id = as.numeric(opponent_id))
+
+newteamstats <- teamstats %>% 
+  inner_join(opponent) %>% 
+  mutate(
+    orb = offensive_rebounds / (offensive_rebounds + opponent_defensive_rebounds),
+    drb = defensive_rebounds / (opponent_offensive_rebounds + defensive_rebounds),
+    rolling_orb = rollmean(lag(orb, n=1), k=2, fill=orb),
+    rolling_drb = rollmean(lag(drb, n=1), k=2, fill=drb)
+    )
+
+newteamstats <- newteamstats %>% left_join(kenpom, by = c("opponent_name" = "team", "season" = "year"))
+```
+
+```{r}
+modelgames <- newteamstats %>%
+  select(team_short_display_name, opponent_name, game_date, season, team_score, rolling_true_shooting_percentage, rolling_free_throw_factor, rolling_turnover_percentage, rolling_orb, rolling_drb, adj_d) %>% na.omit()
+```
+
+```{r}
+game_split <- initial_split(modelgames, prop = .8)
+game_train <- training(game_split)
+game_test <- testing(game_split)
+```
+
+```{r}
+game_rec <- 
+  recipe(team_score ~ ., data = game_train) %>%
+  update_role(team_short_display_name, opponent_name, game_date, season, new_role = "ID")
+
+summary(game_rec)
+```
+
+```{r}
+xg_mod <- boost_tree(
+  trees = tune(), 
+  learn_rate = tune(),
+  tree_depth = tune(), 
+  min_n = tune(),
+  loss_reduction = tune(), 
+  sample_size = tune(), 
+  mtry = tune(), 
+  ) %>% 
+  set_mode("regression") %>% 
+ set_engine("xgboost")
+```
+
+```{r}
+game_wflow <- 
+  workflow() %>% 
+  add_model(xg_mod) %>% 
+  add_recipe(game_rec)
+```
+
+```{r}
+xgb_grid <- grid_latin_hypercube(
+  trees(),
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), game_train),
+  learn_rate(),
+  size = 30
+)
+
+xgb_grid
+```
+
+```{r}
+game_folds <- vfold_cv(game_train)
+
+game_folds
+```
+
+```{r}
+#doParallel::registerDoParallel(cores = cores)
+
+xgb_res <- tune_grid(
+  game_wflow,
+  resamples = game_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+#doParallel::stopImplicitCluster()
+
+xgb_res
+```
+
+```{r}
+collect_metrics(xgb_res)
+```
+
+```{r}
+show_best(xgb_res, "rmse")
+```
+
+```{r}
+best_rmse <- select_best(xgb_res, "rmse")
+```
+
+```{r}
+final_xgb <- finalize_workflow(
+  game_wflow,
+  best_rmse
+)
+
+final_xgb
+```
+
+```{r}
+xg_fit <- 
+  final_xgb %>% 
+  fit(data = game_train)
+```
+
+```{r}
+xg_fit %>% 
+  pull_workflow_fit() 
+```
+
+```{r}
+trainresults <- game_train %>%
+  bind_cols(predict(xg_fit, game_train))
+```
+
+```{r}
+metrics(trainresults, truth = team_score, estimate = .pred)
+```
+
+```{r}
+testresults <- game_test %>%
+  bind_cols(predict(xg_fit, game_test))
+```

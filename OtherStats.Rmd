@@ -1,0 +1,281 @@
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(zoo)
+library(hoopR)
+
+set.seed(1234)
+```
+
+Here we load in KenPom ratings.
+
+```{r}
+kenpom <- read_csv("http://mattwaite.github.io/sportsdatafiles/ratings.csv")
+```
+
+Here we load the namekey. The namekey dataset has four fields: The team_id and the team_short_display_name from hoopR's team box scores, the team from Kenpom and the School from Sports Reference. If you use those to join, they should work MUCH better than before.
+
+```{r}
+namekey <- read_csv("http://mattwaite.github.io/sportsdatafiles/nametable.csv")
+```
+
+We're going to load teamgames and add one thing -- turning the team_id into a number.
+
+```{r}
+teamgames <- load_mbb_team_box(seasons = 2015:2022) %>%
+  separate(field_goals_made_field_goals_attempted, into = c("field_goals_made","field_goals_attempted")) %>%
+  separate(three_point_field_goals_made_three_point_field_goals_attempted, into = c("three_point_field_goals_made","three_point_field_goals_attempted")) %>%
+  separate(free_throws_made_free_throws_attempted, into = c("free_throws_made","free_throws_attempted")) %>%
+  mutate_at(12:34, as.numeric) %>% 
+  mutate(team_id = as.numeric(team_id))
+```
+
+Now, we can simply join data using the namekey. So long as you left join the namekey to your hoopR data, you should be able to add kenpom or Sports Reference data without issue. 
+
+```{r}
+teamgames %>% left_join(namekey) %>% left_join(kenpom)
+```
+
+
+
+```{r}
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    possessions = field_goals_attempted - offensive_rebounds + turnovers + (.475 * free_throws_attempted),
+    team_offensive_efficiency = (team_score/possessions)*100,
+    true_shooting_percentage = (team_score / (2*(field_goals_attempted + (.44 * free_throws_attempted)))) * 100,
+    turnover_pct = turnovers/(field_goals_attempted + 0.44 * free_throws_attempted + turnovers),
+    free_throw_factor = free_throws_made/field_goals_attempted,
+    team_rolling_true_shooting_percentage = rollmean(lag(true_shooting_percentage, n=1), k=10, align="right", fill=NA),
+    team_rolling_turnover_percentage = rollmean(lag(turnover_pct, n=1), k=10, align="right", fill=NA),
+    team_rolling_free_throw_factor = rollmean(lag(free_throw_factor, n=1), k=10, align="right", fill=NA), 
+    team_cumulative_mean_true_shooting = lag(cummean(true_shooting_percentage), n=1, default=0),
+    team_cumulative_mean_turnover_percentage = lag(cummean(turnover_pct), n=1, default=0),
+    team_cumulative_mean_free_throw_factor = lag(cummean(free_throw_factor), n=1, default=0),
+    team_cumulative_o_eff = lag(cummean(team_offensive_efficiency), n=1, default=0)
+  ) %>% ungroup() 
+
+teamstats <- teamstats %>% 
+  select(game_id, team_id, team_offensive_efficiency) %>%
+  mutate(team_id = as.numeric(team_id)) %>% 
+  rename(opponent_id = team_id, opponent_offensive_efficiency=team_offensive_efficiency) %>% 
+  left_join(teamstats) %>%
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_cumulative_d_eff = lag(cummean(opponent_offensive_efficiency), n=1, default=0)
+    ) %>% ungroup()
+
+opponent <- teamstats %>% select(game_id, team_id, offensive_rebounds, defensive_rebounds) %>% rename(opponent_id=team_id, opponent_offensive_rebounds = offensive_rebounds, opponent_defensive_rebounds=defensive_rebounds) %>% mutate(opponent_id = as.numeric(opponent_id))
+
+newteamstats <- teamstats %>% 
+  inner_join(opponent) %>% 
+  mutate(
+    orb = offensive_rebounds / (offensive_rebounds + opponent_defensive_rebounds),
+    drb = defensive_rebounds / (opponent_offensive_rebounds + defensive_rebounds),
+    team_rolling_orb = rollmean(lag(orb, n=1), k=10, align="right", fill=NA),
+    team_rolling_drb = rollmean(lag(drb, n=1), k=10, align="right", fill=NA),
+    team_cumulative_mean_orb = lag(cummean(orb), n=1, default=0),
+    team_cumulative_mean_drb = lag(cummean(drb), n=1, default=0)
+    )
+
+team_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, opponent_id, game_date, season, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb, team_cumulative_mean_true_shooting, team_cumulative_mean_turnover_percentage, team_cumulative_mean_free_throw_factor, team_cumulative_mean_orb, team_cumulative_mean_drb, team_cumulative_o_eff, team_cumulative_d_eff) %>% na.omit()
+
+opponent_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb, team_cumulative_mean_true_shooting, team_cumulative_mean_turnover_percentage, team_cumulative_mean_free_throw_factor, team_cumulative_mean_orb, team_cumulative_mean_drb, team_cumulative_o_eff, team_cumulative_d_eff) %>% na.omit() %>%
+  rename(
+    opponent_id = team_id,
+    opponent_short_display_name = team_short_display_name,
+    opponent_score = team_score,
+    opponent_rolling_true_shooting_percentage = team_rolling_true_shooting_percentage,
+    opponent_rolling_free_throw_factor = team_rolling_free_throw_factor,
+    opponent_rolling_turnover_percentage = team_rolling_turnover_percentage,
+    opponent_rolling_orb = team_rolling_orb,
+    opponent_rolling_drb = team_rolling_drb,
+    opponent_cumulative_mean_true_shooting = team_cumulative_mean_true_shooting,
+    opponent_cumulative_mean_turnover_percentage = team_cumulative_mean_turnover_percentage,
+    opponent_cumulative_mean_free_throw_factor = team_cumulative_mean_free_throw_factor,
+    opponent_cumulative_mean_orb = team_cumulative_mean_orb,
+    opponent_cumulative_mean_drb = team_cumulative_mean_drb,
+    opponent_cumulative_o_eff = team_cumulative_o_eff,
+    opponent_cumulative_d_eff = team_cumulative_d_eff
+  ) %>%
+  mutate(
+    opponent_id = as.numeric(opponent_id)
+    )
+
+games <- team_side %>% inner_join(opponent_side) %>% mutate(
+  TeamResult = as.factor(case_when(
+    team_score > opponent_score ~ "W",
+    opponent_score > team_score ~ "L"
+))) %>% na.omit()
+
+games$TeamResult <- relevel(games$TeamResult, ref="W")
+
+rollingmodelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb, opponent_rolling_true_shooting_percentage, opponent_rolling_free_throw_factor, opponent_rolling_turnover_percentage, opponent_rolling_orb, opponent_rolling_drb, TeamResult) 
+
+cumulativemodelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, team_cumulative_mean_true_shooting, team_cumulative_mean_turnover_percentage, team_cumulative_mean_free_throw_factor, team_cumulative_mean_orb, team_cumulative_mean_drb, team_cumulative_o_eff, opponent_cumulative_mean_true_shooting, opponent_cumulative_mean_turnover_percentage, opponent_cumulative_mean_free_throw_factor, opponent_cumulative_mean_orb, opponent_cumulative_mean_drb, opponent_cumulative_o_eff, opponent_cumulative_d_eff, TeamResult) 
+
+cumulativesimplemodelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, team_cumulative_o_eff, team_cumulative_d_eff, opponent_cumulative_o_eff, opponent_cumulative_d_eff, TeamResult) 
+```
+
+
+```{r}
+cumulative_split <- initial_split(cumulativesimplemodelgames, prop = .8)
+cumulative_train <- training(cumulative_split)
+cumulative_test <- testing(cumulative_split)
+```
+
+```{r}
+cumulative_recipe <- 
+  recipe(TeamResult ~ ., data = cumulative_train) %>% 
+  update_role(game_id, game_date, team_short_display_name, opponent_short_display_name, season, new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(cumulative_recipe)
+```
+
+```{r}
+svm_mod <- 
+  svm_poly() %>%
+  set_engine("kernlab") %>%
+  set_mode("classification") 
+```
+
+```{r}
+svm_cumulative_workflow <- 
+  workflow() %>% 
+  add_model(svm_mod) %>% 
+  add_recipe(cumulative_recipe)
+```
+
+```{r}
+svm_cumulative_fit <- 
+  svm_cumulative_workflow %>% 
+  fit(data = cumulative_train)
+
+svmcumulativetrainresults <- cumulative_train %>%
+  bind_cols(predict(svm_cumulative_fit, cumulative_train))
+
+metrics(svmcumulativetrainresults, truth = TeamResult, estimate = .pred_class)
+```
+
+```{r}
+svmcumulativetestresults <- cumulative_test %>%
+  bind_cols(predict(svm_cumulative_fit, cumulative_test))
+
+metrics(svmcumulativetestresults, truth = TeamResult, estimate = .pred_class)
+```
+
+```{r}
+teamstats <- teamgames %>% 
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_score = ((field_goals_made-three_point_field_goals_made) * 2) + (three_point_field_goals_made*3) + free_throws_made,
+    possessions = field_goals_attempted - offensive_rebounds + turnovers + (.475 * free_throws_attempted),
+    team_offensive_efficiency = (team_score/possessions)*100,
+    true_shooting_percentage = (team_score / (2*(field_goals_attempted + (.44 * free_throws_attempted)))) * 100,
+    turnover_pct = turnovers/(field_goals_attempted + 0.44 * free_throws_attempted + turnovers),
+    free_throw_factor = free_throws_made/field_goals_attempted,
+    team_rolling_true_shooting_percentage = rollmean(true_shooting_percentage, k=10, align="right", fill=NA),
+    team_rolling_turnover_percentage = rollmean(turnover_pct, k=10, align="right", fill=NA),
+    team_rolling_free_throw_factor = rollmean(free_throw_factor, k=10, align="right", fill=NA), 
+    team_cumulative_mean_true_shooting = cummean(true_shooting_percentage),
+    team_cumulative_mean_turnover_percentage = cummean(turnover_pct),
+    team_cumulative_mean_free_throw_factor = cummean(free_throw_factor),
+    team_cumulative_o_eff = cummean(team_offensive_efficiency)
+  ) %>% ungroup() 
+
+teamstats <- teamstats %>% 
+  select(game_id, team_id, team_offensive_efficiency) %>%
+  mutate(team_id = as.numeric(team_id)) %>% 
+  rename(opponent_id = team_id, opponent_offensive_efficiency=team_offensive_efficiency) %>% 
+  left_join(teamstats) %>%
+  group_by(team_short_display_name, season) %>%
+  arrange(game_date) %>%
+  mutate(
+    team_cumulative_d_eff = cummean(opponent_offensive_efficiency)
+    ) %>% ungroup()
+
+opponent <- teamstats %>% select(game_id, team_id, offensive_rebounds, defensive_rebounds) %>% rename(opponent_id=team_id, opponent_offensive_rebounds = offensive_rebounds, opponent_defensive_rebounds=defensive_rebounds) %>% mutate(opponent_id = as.numeric(opponent_id))
+
+newteamstats <- teamstats %>% 
+  inner_join(opponent) %>% 
+  mutate(
+    orb = offensive_rebounds / (offensive_rebounds + opponent_defensive_rebounds),
+    drb = defensive_rebounds / (opponent_offensive_rebounds + defensive_rebounds),
+    team_rolling_orb = rollmean(orb, k=10, align="right", fill=NA),
+    team_rolling_drb = rollmean(drb, k=10, align="right", fill=NA),
+    team_cumulative_mean_orb = cummean(orb),
+    team_cumulative_mean_drb = cummean(drb)
+    )
+
+team_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, opponent_id, game_date, season, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb, team_cumulative_mean_true_shooting, team_cumulative_mean_turnover_percentage, team_cumulative_mean_free_throw_factor, team_cumulative_mean_orb, team_cumulative_mean_drb, team_cumulative_o_eff, team_cumulative_d_eff) %>% na.omit()
+
+opponent_side <- newteamstats %>%
+  select(game_id, team_id, team_short_display_name, team_score, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb, team_cumulative_mean_true_shooting, team_cumulative_mean_turnover_percentage, team_cumulative_mean_free_throw_factor, team_cumulative_mean_orb, team_cumulative_mean_drb, team_cumulative_o_eff, team_cumulative_d_eff) %>% na.omit() %>%
+  rename(
+    opponent_id = team_id,
+    opponent_short_display_name = team_short_display_name,
+    opponent_score = team_score,
+    opponent_rolling_true_shooting_percentage = team_rolling_true_shooting_percentage,
+    opponent_rolling_free_throw_factor = team_rolling_free_throw_factor,
+    opponent_rolling_turnover_percentage = team_rolling_turnover_percentage,
+    opponent_rolling_orb = team_rolling_orb,
+    opponent_rolling_drb = team_rolling_drb,
+    opponent_cumulative_mean_true_shooting = team_cumulative_mean_true_shooting,
+    opponent_cumulative_mean_turnover_percentage = team_cumulative_mean_turnover_percentage,
+    opponent_cumulative_mean_free_throw_factor = team_cumulative_mean_free_throw_factor,
+    opponent_cumulative_mean_orb = team_cumulative_mean_orb,
+    opponent_cumulative_mean_drb = team_cumulative_mean_drb,
+    opponent_cumulative_o_eff = team_cumulative_o_eff,
+    opponent_cumulative_d_eff = team_cumulative_d_eff
+  ) %>%
+  mutate(
+    opponent_id = as.numeric(opponent_id)
+    )
+
+games <- team_side %>% inner_join(opponent_side) %>% mutate(
+  TeamResult = as.factor(case_when(
+    team_score > opponent_score ~ "W",
+    opponent_score > team_score ~ "L"
+))) %>% na.omit()
+
+games$TeamResult <- relevel(games$TeamResult, ref="W")
+
+rollingmodelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, team_rolling_true_shooting_percentage, team_rolling_free_throw_factor, team_rolling_turnover_percentage, team_rolling_orb, team_rolling_drb, opponent_rolling_true_shooting_percentage, opponent_rolling_free_throw_factor, opponent_rolling_turnover_percentage, opponent_rolling_orb, opponent_rolling_drb, TeamResult) 
+
+cumulativemodelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, team_cumulative_mean_true_shooting, team_cumulative_mean_turnover_percentage, team_cumulative_mean_free_throw_factor, team_cumulative_mean_orb, team_cumulative_mean_drb, team_cumulative_o_eff, opponent_cumulative_mean_true_shooting, opponent_cumulative_mean_turnover_percentage, opponent_cumulative_mean_free_throw_factor, opponent_cumulative_mean_orb, opponent_cumulative_mean_drb, opponent_cumulative_o_eff, opponent_cumulative_d_eff, TeamResult) 
+
+cumulativesimplemodelgames <- games %>% select(game_id, game_date, team_short_display_name, opponent_short_display_name, season, team_cumulative_o_eff, team_cumulative_d_eff, opponent_cumulative_o_eff, opponent_cumulative_d_eff, TeamResult) 
+```
+
+```{r}
+round1games <- tibble(
+  team_short_display_name="Penn State",
+  opponent_short_display_name="Illinois"
+) %>% add_row(
+  team_short_display_name="Michigan State",
+  opponent_short_display_name="Ohio State"
+) %>% add_row(
+  team_short_display_name="Iowa",
+  opponent_short_display_name="Michigan"
+)
+
+round1games <- cumulativesimplemodelgames %>% group_by(team_short_display_name) %>% filter(game_date == max(game_date) & season == 2022) %>% select(-TeamResult, -starts_with("opponent")) %>% right_join(round1games)
+
+round1games <- cumulativesimplemodelgames %>% group_by(opponent_short_display_name) %>% filter(game_date == max(game_date) & season == 2022) %>% ungroup() %>% select(-TeamResult, -starts_with("team"), -game_id, -game_date, -season) %>% right_join(round1games) 
+
+round1 <- svm_cumulative_fit %>% predict(new_data = round1games) %>%
+  bind_cols(round1games) %>% select(.pred_class, team_short_display_name, opponent_short_display_name, everything())
+
+round1
+```
+
+

@@ -1,0 +1,77 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(readxl)
+library(ggrepel)
+library(gridExtra)
+library(mgcv)
+library(hoopR)
+```
+
+```{r}
+plays <- load_nba_pbp(
+  seasons = most_recent_mbb_season()
+)
+```
+
+```{r}
+shots <- plays %>% 
+  filter(shooting_play == TRUE & coordinate_x >= 0) %>% 
+  mutate(
+    distance = sqrt(((coordinate_x-25)^2) + ((coordinate_y-0)^2)),
+    shot_status = as.factor(case_when(
+      grepl("makes", text) == TRUE ~ "Made",
+      TRUE ~ "Missed"
+  ))) %>% filter(is.na(distance) == FALSE)
+```
+
+```{r}
+levels(shots$shot_status)
+```
+
+```{r}
+model <- shots %>% select(coordinate_x, coordinate_y, distance, shot_status)
+```
+
+
+``` {r}
+# lol didnt work, but i feel like theres a way to use a GAM here since the coordinate_x data should have a nonlinear affect on shooting percentage
+
+# splitting into testing and training data to more rigorously examine the model
+set.seed(1234)
+model_split <- initial_split(model, prop = .8)
+model_train <- training(model_split)
+model_test <- testing(model_split)
+
+# using a binomial method for a binary dependent variable
+model_gam_train <- gam(shot_status ~ s(coordinate_x) +coordinate_y, data=model_train, binomial)
+summary(model_gam_train)
+
+# binding prediction results to new dataframe 
+trainresults <- model_train %>%
+    bind_cols(predict.gam(model_gam_train, model_train))
+
+# creating a function so that we can obtain probabilities from the logit-odds output
+logit2prob <- function(logit){
+  odds <- exp(logit)
+  prob <- odds / (1 + odds)
+  return(prob)
+}
+```
+
+``` {r}
+# mutating to get probabilities and also create a binary variable for visualization purposes
+trainresults <- trainresults %>% mutate(probmake = logit2prob(trainresults[5]),
+                                        pred.class = ifelse(probmake > 0.499999999, "Made", "Missed"))
+
+```
+
+```{r}
+# a glance at the confusion matrix reveals a ~40% accuracy in the model, so worse than chance
+trainresults %>% conf_mat(shot_status, pred.class)
+```
+
+```{r}
+
+```
+

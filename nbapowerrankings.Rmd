@@ -1,0 +1,73 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+
+teamstats <- read.csv("advancednba.csv")
+```
+
+```{r}
+teamstats <- teamstats %>% mutate(winpct = W/(W+L))
+
+game_split <- initial_split(teamstats, prop = .8)
+game_train <- training(game_split)
+game_test <- testing(game_split)
+
+game_recipe <- 
+  recipe(winpct ~ ., data = teamstats) %>% 
+  update_role(Rk, Team, 
+              new_role = "ID") %>%
+  step_normalize(all_predictors())
+
+summary(game_recipe)
+```
+
+```{r}
+rf_mod <- 
+  rand_forest() %>% 
+  set_engine("ranger") %>%
+  set_mode("regression")
+```
+
+```{r}
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(game_recipe)
+```
+
+```{r}
+rf_fit <- 
+  rf_workflow %>% 
+  fit(data = game_train)
+```
+
+
+```{r}
+rfpredict <- rf_fit %>% predict(new_data = game_train) %>%
+  bind_cols(game_train) 
+
+# rfpredict <- rf_fit %>% predict(new_data = game_train, type="prob") %>%
+#   bind_cols(rfpredict)
+```
+
+
+```{r}
+metrics(rfpredict, winpct, estimate = .pred)
+```
+
+```{r}
+rftestpredict <- rf_fit %>% predict(new_data = game_test) %>%
+  bind_cols(game_test)
+
+# rftestpredict <- rf_fit %>% predict(new_data = game_test, type="prob") %>%
+#   bind_cols(rftestpredict)
+
+metrics(rftestpredict, winpct, estimate=.pred)
+```
+```{r}
+rfpredictall <- rf_fit %>% predict(new_data = teamstats) %>%
+  bind_cols(teamstats)
+
+metrics(rfpredictall, winpct, estimate=.pred)
+```
+
